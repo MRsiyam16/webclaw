@@ -4416,7 +4416,30 @@ export function inPageGetElementCoordinates(refOrIndex: number | string): {
     };
   }
 
+  // Label → control resolution.
+  // A <label for="x"> (or a label wrapping its control) is clickable, so the
+  // indexer assigns it an index, but it is NOT fillable. Targeting it made
+  // fills abort with "Focus verification failed: target element [n] (<label>)
+  // is not active" on ordinary forms — the agent asked for the "Full name"
+  // field and got the <label>. Follow the association to the real control.
+  let labelResolutionNote: string | undefined;
+  if (el instanceof HTMLLabelElement) {
+    const control =
+      (el as HTMLLabelElement).control ||
+      (el.htmlFor ? document.getElementById(el.htmlFor) : null) ||
+      el.querySelector('input, select, textarea, [contenteditable="true"]');
+    if (control && control instanceof Element) {
+      el = control;
+      labelResolutionNote =
+        `Index [${index}] pointed at a <label>; resolved to its associated ` +
+        `<${control.tagName.toLowerCase()}${control.getAttribute('type') ? ' type=' + control.getAttribute('type') : ''}> control.`;
+    }
+  }
+
   const details: any = extractElementLocationDetails(el);
+  if (labelResolutionNote) {
+    details.labelResolved = labelResolutionNote;
+  }
   if (warning) {
     details.warning = warning;
   }
@@ -5808,6 +5831,19 @@ export function inPageVerifyActiveElement(
     try {
       targetEl = document.querySelector(refOrIndex);
     } catch {}
+  }
+
+  // Mirror the label → control resolution used when resolving coordinates:
+  // the click now lands on the labelled control, so the focus guard must
+  // expect that control (otherwise a correct fill still aborts).
+  if (targetEl instanceof HTMLLabelElement) {
+    const control =
+      (targetEl as HTMLLabelElement).control ||
+      (targetEl.htmlFor ? document.getElementById(targetEl.htmlFor) : null) ||
+      targetEl.querySelector('input, select, textarea, [contenteditable="true"]');
+    if (control && control instanceof Element) {
+      targetEl = control;
+    }
   }
 
   if (!targetEl) {

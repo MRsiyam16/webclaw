@@ -3,7 +3,8 @@ import { BaseBrowserToolExecutor } from '../base-browser';
 import { TOOL_NAMES, TOOL_SCHEMAS, TOOL_CATEGORIES } from 'chrome-mcp-shared';
 
 interface ToolDocsParams {
-  category: 'navigate' | 'perceive' | 'act' | 'observe' | 'manage' | 'crawl' | 'diagnose' | 'network';
+  category:
+    'navigate' | 'perceive' | 'act' | 'observe' | 'manage' | 'crawl' | 'diagnose' | 'network';
   activateForSession?: boolean;
 }
 
@@ -18,12 +19,21 @@ export class ToolDocsTool extends BaseBrowserToolExecutor {
   name = TOOL_NAMES.BROWSER.TOOL_DOCS;
 
   async execute(args: ToolDocsParams): Promise<ToolResult> {
-    const names = new Set((TOOL_CATEGORIES[args.category] || '').split(' ').filter(Boolean));
-    if (names.size === 0) {
-      return createErrorResponse(`Unknown category '${args.category}'. Valid: ${Object.keys(TOOL_CATEGORIES).join(', ')}`);
+    const category = args?.category;
+    if (!category || typeof category !== 'string') {
+      // Previously returned `Unknown category 'undefined'`, which reads like a
+      // bad value rather than a missing required argument.
+      return createErrorResponse(
+        `category is required. Valid: ${Object.keys(TOOL_CATEGORIES).join(', ')}`,
+      );
     }
-    const docs = TOOL_SCHEMAS
-      .filter((t) => names.has(t.name))
+    const names = new Set((TOOL_CATEGORIES[category] || '').split(' ').filter(Boolean));
+    if (names.size === 0) {
+      return createErrorResponse(
+        `Unknown category '${category}'. Valid: ${Object.keys(TOOL_CATEGORIES).join(', ')}`,
+      );
+    }
+    const docs = TOOL_SCHEMAS.filter((t) => names.has(t.name))
       .map((t) => {
         const props = (t.inputSchema as any)?.properties ?? {};
         const required: string[] = (t.inputSchema as any)?.required ?? [];

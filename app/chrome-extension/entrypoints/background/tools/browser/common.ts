@@ -131,18 +131,9 @@ class NavigateTool extends BaseBrowserToolExecutor {
   }
 
   async execute(args: NavigateToolParams): Promise<ToolResult> {
-    const {
-      newWindow = false,
-      width,
-      height,
-      refresh = false,
-      tabId,
-      background,
-      windowId,
-    } = args;
+    const { newWindow = false, width, height, refresh = false, tabId, background, windowId } = args;
     const url =
-      args.url ||
-      (args.action === 'back' || args.action === 'forward' ? args.action : undefined);
+      args.url || (args.action === 'back' || args.action === 'forward' ? args.action : undefined);
 
     console.log(
       `Attempting to ${refresh ? 'refresh current tab' : `open URL: ${url}`} with options:`,
@@ -181,7 +172,11 @@ class NavigateTool extends BaseBrowserToolExecutor {
 
         if (args.dismissOverlays) {
           try {
-            const dismissRes = await executeInPage({ tabId: targetTabId }, 'inPageDismissOverlays', []);
+            const dismissRes = await executeInPage(
+              { tabId: targetTabId },
+              'inPageDismissOverlays',
+              [],
+            );
             const count = dismissRes?.[0]?.result?.dismissedCount ?? 0;
             if (count > 0) {
               await waitForPageSettle(targetTabId, { timeoutMs: 500 }).catch(() => {});
@@ -284,6 +279,24 @@ class NavigateTool extends BaseBrowserToolExecutor {
         };
       }
 
+      // Validate the URL *before* any tab matching. A scheme-less or malformed
+      // string used to reach chrome.tabs.update/create unresolved, so Chrome
+      // resolved it against the extension origin and the navigation silently
+      // "succeeded" onto chrome-extension://<id>/<garbage>.
+      if (typeof url === 'string' && !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url)) {
+        return createErrorResponse(
+          `Invalid URL '${url}': missing a scheme. Pass an absolute URL such as ` +
+            `'https://example.com/path' (scheme-less hosts are not resolved relative to any page).`,
+        );
+      }
+      try {
+        new URL(url);
+      } catch {
+        return createErrorResponse(
+          `Invalid URL '${url}': could not be parsed. Pass an absolute URL such as 'https://example.com/path'.`,
+        );
+      }
+
       // 1. Check if URL is already open
       // Prefer Chrome's URL match patterns for robust matching (host/path variations)
       console.log(`Checking if URL is already open: ${url}`);
@@ -354,8 +367,10 @@ class NavigateTool extends BaseBrowserToolExecutor {
         try {
           candidateTabs = (await chrome.tabs.query({ url: urlPatterns })) || [];
         } catch {
-          const allTabs = (await chrome.tabs.query({})) || [];
-          candidateTabs = allTabs || [];
+          // A pattern Chrome rejects must NOT widen the search to every open
+          // tab — that turned a typo'd URL into "activate an arbitrary tab".
+          console.warn('URL pattern matching failed; not falling back to all tabs', urlPatterns);
+          candidateTabs = [];
         }
         if (!Array.isArray(candidateTabs)) candidateTabs = [];
         console.log(`Found ${candidateTabs.length} matching tabs with patterns:`, urlPatterns);
@@ -448,7 +463,9 @@ class NavigateTool extends BaseBrowserToolExecutor {
         }
       }
 
-      const existingTab = protectedPersonalTab ? null : (explicitTab || pickBestMatch(url, candidateTabs));
+      const existingTab = protectedPersonalTab
+        ? null
+        : explicitTab || pickBestMatch(url, candidateTabs);
       if (existingTab?.id !== undefined) {
         if (sessionId && typeof existingTab.id === 'number') {
           sessionTabAffinity.setAffinity(sessionId, existingTab.id);
@@ -477,7 +494,11 @@ class NavigateTool extends BaseBrowserToolExecutor {
 
           if (args.dismissOverlays) {
             try {
-              const dismissRes = await executeInPage({ tabId: existingTab.id }, 'inPageDismissOverlays', []);
+              const dismissRes = await executeInPage(
+                { tabId: existingTab.id },
+                'inPageDismissOverlays',
+                [],
+              );
               const count = dismissRes?.[0]?.result?.dismissedCount ?? 0;
               if (count > 0) {
                 await waitForPageSettle(existingTab.id, { timeoutMs: 500 }).catch(() => {});
@@ -560,7 +581,11 @@ class NavigateTool extends BaseBrowserToolExecutor {
             await this.waitForTabNavigationComplete(firstTab.id);
             if (args.dismissOverlays) {
               try {
-                const dismissRes = await executeInPage({ tabId: firstTab.id }, 'inPageDismissOverlays', []);
+                const dismissRes = await executeInPage(
+                  { tabId: firstTab.id },
+                  'inPageDismissOverlays',
+                  [],
+                );
                 const count = dismissRes?.[0]?.result?.dismissedCount ?? 0;
                 if (count > 0) {
                   await waitForPageSettle(firstTab.id, { timeoutMs: 500 }).catch(() => {});
@@ -624,7 +649,11 @@ class NavigateTool extends BaseBrowserToolExecutor {
             await this.waitForTabNavigationComplete(newTab.id);
             if (args.dismissOverlays) {
               try {
-                const dismissRes = await executeInPage({ tabId: newTab.id }, 'inPageDismissOverlays', []);
+                const dismissRes = await executeInPage(
+                  { tabId: newTab.id },
+                  'inPageDismissOverlays',
+                  [],
+                );
                 const count = dismissRes?.[0]?.result?.dismissedCount ?? 0;
                 if (count > 0) {
                   await waitForPageSettle(newTab.id, { timeoutMs: 500 }).catch(() => {});
@@ -978,15 +1007,18 @@ class CloseTabsTool extends BaseBrowserToolExecutor {
       }
 
       // If no tabIds or URL provided, protect active tab against accidental closure
-      // Require either session tab affinity or explicit confirmation
+      // Require explicit confirmation (or explicit targets) in all cases.
       const affinityTab = sessionId ? await sessionTabAffinity.resolveSessionTab(sessionId) : null;
       let targetTabId = affinityTab?.id;
+      if (args.confirm !== true) {
+        // Session affinity is a routing hint, not user intent: a bare
+        // close_tabs call previously destroyed the session-bound tab (often the
+        // user's real page) with no confirmation at all.
+        return createErrorResponse(
+          'No tabIds or url specified. To close the current active tab, pass confirm: true or specify tabIds explicitly to prevent unintended tab destruction.',
+        );
+      }
       if (!targetTabId) {
-        if (args.confirm !== true) {
-          return createErrorResponse(
-            'No tabIds or url specified. To close the current active tab, pass confirm: true or specify tabIds explicitly to prevent unintended tab destruction.',
-          );
-        }
         const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!activeTab || !activeTab.id) {
           return createErrorResponse('No active tab found');

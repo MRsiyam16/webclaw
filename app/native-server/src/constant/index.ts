@@ -27,9 +27,13 @@ export function getChromeMcpHost(): string {
 
 export const DEFAULT_EXTENSION_ID = 'hbdgbgagpkpjffpklnamcljpakneikee';
 
+// Locally loaded (unpacked) builds get a path-derived ID that differs from the
+// published Web Store ID, so allow both.
+export const LOCAL_EXTENSION_ID = 'biadnhhjlcaaopimoahhgcaipcbhafkf';
+
 export function getAllowedExtensionIds(): string[] {
   const envId = process.env.CHROME_EXTENSION_ID || process.env.EXTENSION_ID;
-  const set = new Set<string>([DEFAULT_EXTENSION_ID]);
+  const set = new Set<string>([DEFAULT_EXTENSION_ID, LOCAL_EXTENSION_ID]);
   if (envId) {
     envId.split(',').forEach((id) => {
       const trimmed = id.trim();
@@ -47,7 +51,12 @@ export const SERVER_CONFIG = {
    * CORS origin whitelist - only allow Chrome/Firefox extensions and local debugging.
    * Use RegExp patterns for extension origins, string for exact match.
    */
-  CORS_ORIGIN: [/^chrome-extension:\/\//, /^moz-extension:\/\//, 'http://127.0.0.1', 'http://localhost'] as const,
+  CORS_ORIGIN: [
+    /^chrome-extension:\/\//,
+    /^moz-extension:\/\//,
+    'http://127.0.0.1',
+    'http://localhost',
+  ] as const,
   LOGGER_ENABLED: false,
 } as const;
 

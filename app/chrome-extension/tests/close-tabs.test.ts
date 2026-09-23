@@ -28,7 +28,7 @@ describe('CloseTabsTool (chrome_close_tabs)', () => {
     expect(mockTabsRemove).toHaveBeenCalledWith(101);
   });
 
-  it('closes session affinity tab without requiring confirm when sessionId has affinity', async () => {
+  it('refuses to close the session affinity tab when confirm is not passed', async () => {
     const mockTabsGet = vi.fn().mockImplementation(async (tid: number) => {
       if (tid === 202) return { id: 202, active: false };
       throw new Error('Tab not found');
@@ -41,7 +41,26 @@ describe('CloseTabsTool (chrome_close_tabs)', () => {
     sessionTabAffinity.setAffinity('session-agent-1', 202);
     expect(sessionTabAffinity.getAffinity('session-agent-1')).toBe(202);
 
+    // Affinity is a routing hint, not user intent: without confirm: true the
+    // tab must survive, otherwise a bare close_tabs destroys the user's page.
     const res = await closeTabsTool.execute({ sessionId: 'session-agent-1' });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain('pass confirm: true or specify tabIds explicitly');
+    expect(mockTabsRemove).not.toHaveBeenCalled();
+  });
+
+  it('closes the session affinity tab when sessionId has affinity and confirm: true', async () => {
+    const mockTabsGet = vi.fn().mockImplementation(async (tid: number) => {
+      if (tid === 202) return { id: 202, active: false };
+      throw new Error('Tab not found');
+    });
+    const mockTabsRemove = vi.fn().mockResolvedValue(undefined);
+    (chrome.tabs as any).get = mockTabsGet;
+    (chrome.tabs as any).remove = mockTabsRemove;
+
+    sessionTabAffinity.setAffinity('session-agent-1', 202);
+
+    const res = await closeTabsTool.execute({ sessionId: 'session-agent-1', confirm: true });
     expect(res.isError).toBe(false);
     const parsed = JSON.parse(res.content[0].text);
     expect(parsed.success).toBe(true);

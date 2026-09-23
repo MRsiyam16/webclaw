@@ -339,6 +339,14 @@ export abstract class BaseBrowserToolExecutor implements ToolExecutor {
       if (tab && tab.id) {
         return tab;
       }
+      // SECURITY/SAFETY: an explicit tabId that does not resolve must never be
+      // silently substituted with a different tab. Doing so let tools act on
+      // (or close) an unrelated tab while reporting success for the requested
+      // one. Fail loudly instead so the caller re-reads the tab list.
+      throw new Error(
+        `Tab ${options.tabId} does not exist. Refusing to fall back to another tab — ` +
+          `call get_windows_and_tabs to refresh tab IDs, or omit tabId to target the active tab.`,
+      );
     }
 
     if (sessionId) {

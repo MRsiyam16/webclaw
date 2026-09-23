@@ -244,7 +244,10 @@ export async function createManifestContent(): Promise<any> {
     description: DESCRIPTION,
     path: mainPath, // Node.js可执行文件路径
     type: 'stdio',
-    allowed_origins: [`chrome-extension://${EXTENSION_ID}/`],
+    allowed_origins: [
+      `chrome-extension://${EXTENSION_ID}/`,
+      'chrome-extension://biadnhhjlcaaopimoahhgcaipcbhafkf/', // locally loaded unpacked build
+    ],
   };
 }
 

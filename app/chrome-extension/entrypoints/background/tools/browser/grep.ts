@@ -58,7 +58,9 @@ export class GrepTool extends BaseBrowserToolExecutor {
       }
 
       const tabId = tab.id;
-      const limit = Math.min(Math.max(1, args.limit ?? 20), 50);
+      const limitRequested = args.limit ?? 20;
+      const limit = Math.min(Math.max(1, limitRequested), 50);
+      const limitClamped = limit !== limitRequested;
       const searchType = args.searchType || 'interactive_only';
 
       let pattern: RegExp;
@@ -139,16 +141,22 @@ export class GrepTool extends BaseBrowserToolExecutor {
           .replace(/\n[ \t]+/g, '\n')
           .replace(/\n{3,}/g, '\n\n')
           .split('\n');
-        const matches: Array<{ line: number; text: string }> = [];
+        const matches: Array<{ line: number; text: string; index: number | null }> = [];
+        let pageTextHitCount = 0;
 
         for (let idx = 0; idx < lines.length; idx++) {
           const line = lines[idx].trim();
           if (line && pattern.test(line)) {
-            matches.push({
-              line: idx + 1,
-              text: extractContextualSnippet(line, pattern),
-            });
-            if (matches.length >= limit) break;
+            pageTextHitCount++;
+            if (matches.length < limit) {
+              matches.push({
+                line: idx + 1,
+                text: extractContextualSnippet(line, pattern),
+                // page-text hits are not addressable; keep the field present and
+                // explicitly null so consumers get one stable match shape.
+                index: null,
+              });
+            }
           }
         }
 
@@ -160,8 +168,12 @@ export class GrepTool extends BaseBrowserToolExecutor {
                 {
                   query: args.query,
                   searchType: 'page_text',
-                  totalMatches: matches.length,
+                  totalMatches: pageTextHitCount,
+                  returnedCount: matches.length,
+                  truncated: pageTextHitCount > matches.length,
                   limit,
+                  limitRequested,
+                  ...(limitClamped ? { limitClamped: true } : {}),
                   matches,
                 },
                 null,
@@ -229,6 +241,10 @@ export class GrepTool extends BaseBrowserToolExecutor {
         isInteractive: boolean;
         selector?: string;
       }> = [];
+      // True number of matches found, independent of the returned page size.
+      // Reporting matches.length as totalMatches made a capped result look
+      // like the complete truth ("only 50 elements matched" when 300 did).
+      let totalHitCount = 0;
 
       for (const el of elements) {
         if (searchType === 'interactive_only' && !el.isInteractive) {
@@ -268,15 +284,17 @@ export class GrepTool extends BaseBrowserToolExecutor {
           .join(' ');
 
         if (pattern.test(searchableParts)) {
-          matches.push({
-            index: el.index,
-            tagName: el.tagName,
-            role: el.role,
-            text: elText.length > 100 ? elText.slice(0, 97) + '...' : elText,
-            isInteractive: el.isInteractive,
-            selector: indexMap[el.index]?.selector,
-          });
-          if (matches.length >= limit) break;
+          totalHitCount++;
+          if (matches.length < limit) {
+            matches.push({
+              index: el.index,
+              tagName: el.tagName,
+              role: el.role,
+              text: elText.length > 100 ? elText.slice(0, 97) + '...' : elText,
+              isInteractive: el.isInteractive,
+              selector: indexMap[el.index]?.selector,
+            });
+          }
         }
       }
 
@@ -353,8 +371,17 @@ export class GrepTool extends BaseBrowserToolExecutor {
                 query: args.query,
                 searchType,
                 totalMatches:
+                  totalHitCount > 0 ? totalHitCount : (textFallbackMatches?.length ?? 0),
+                returnedCount:
                   matches.length > 0 ? matches.length : (textFallbackMatches?.length ?? 0),
+                truncated:
+                  totalHitCount > matches.length ||
+                  (textFallbackMatches?.length ?? 0) > matches.length,
                 limit,
+                limitRequested,
+                ...(limitClamped ? { limitClamped: true } : {}),
+                scanScope:
+                  'Indexed document elements for the target tab; matches are paged by `limit`, so use totalMatches/truncated rather than assuming the page is complete.',
                 matches: matches.length > 0 ? matches : (textFallbackMatches ?? []),
                 ...(autoScrollOutcome
                   ? {
