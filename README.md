@@ -161,7 +161,7 @@ The micro-loop is bounded: at most 60 steps in Jev mode (default 10), truncated 
 
 Paste this to your agent:
 
-> "Set up BrowserClaw: https://github.com/GoldenLoaf24h/browserclaw. Read INSTALL.md and follow the steps."
+> "Set up webclaw: https://github.com/MRsiyam16/webclaw. Read INSTALL.md and follow the steps."
 
 Then load the extension from `app/chrome-extension/.output/chrome-mv3` into `chrome://extensions`.
 
