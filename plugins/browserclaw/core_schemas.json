@@ -1148,7 +1148,9 @@
         },
         "pauseBeforeKeywords": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "List of keywords (e.g. [\"Post\", \"Submit\", \"Pay\"]). If the predicted action targets an element whose label, text, or role matches any keyword, the micro-loop suspends before execution and returns status \"paused\" with target element context for System 2 confirmation."
         },
         "sessionId": {
@@ -1276,6 +1278,31 @@
         }
       },
       "required": []
+    }
+  },
+  "chrome_extract": {
+    "description": "Tier-2 schema-typed extraction (browser_extract): extracts the fields a JSON Schema declares from the page/HTML root, with source attribution. Each key resolves via [data-field=\"key\"] -> #key -> [name=\"key\"] -> class match -> optional per-property selector -> label text; form controls read value, other elements read textContent, and declared number/integer/boolean types are coerced. Returns { data, missing, sourceRefs } — a key with no source element is reported in missing and is never invented into data.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "object",
+          "description": "JSON Schema object describing the fields to extract: { type: 'object', properties: { <key>: { type: 'string'|'number'|'integer'|'boolean', description?, selector? } }, required?: string[] }"
+        },
+        "selector": {
+          "type": "string",
+          "description": "CSS selector scoping extraction to a subtree (optional; defaults to the whole document)"
+        },
+        "tabId": {
+          "type": "number",
+          "description": "Target tab ID (optional, defaults to the active/affinity tab)"
+        },
+        "sessionId": {
+          "type": "string",
+          "description": "Session identifier for tab affinity binding (optional)"
+        }
+      },
+      "required": ["schema"]
     }
   }
 }

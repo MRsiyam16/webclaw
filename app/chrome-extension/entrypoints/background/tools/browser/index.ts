@@ -47,5 +47,6 @@ export { grepTool } from './grep';
 export { doctorTool } from './doctor';
 export { formPipelineTool } from './form-pipeline';
 export { insertMediaTool } from './insert-media';
+export { extractFrom } from './extract';
 export { dismissOverlayTool } from './dismiss-overlay';
 export { scrollUntilFoundTool } from './scroll-until-found';

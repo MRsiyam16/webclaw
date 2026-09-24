@@ -22,6 +22,8 @@ provides_tools:
   - browserclaw_close_tabs
   - browserclaw_get_windows_and_tabs
   - browserclaw_tool_docs
+  - browserclaw_insert_media
+  - browserclaw_extract
 provides_hooks: []
 provides_middleware: []
 requires_env: []

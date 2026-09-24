@@ -145,6 +145,13 @@ export const TOOL_CATEGORIES: Record<string, string> = {
     'performance_stop_trace',
     'performance_analyze_insight',
   ].join(' '),
+  /**
+   * Tier 3 — power tools. Never in the default profile view: they can read
+   * document.cookie and drive arbitrary input, so they are disclosed by
+   * chrome_tool_docs(category:'power') and only unlocked for the session when
+   * that call passes activateForSession:true.
+   */
+  power: ['chrome_javascript', 'chrome_cdp_execute'].join(' '),
   network: ['chrome_network_request', 'chrome_network_capture'].join(' '),
   crawl: Array.from(CRAWL_TOOL_NAMES).join(' '),
 };

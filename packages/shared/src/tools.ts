@@ -2836,7 +2836,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
       openWorldHint: false,
     },
     description:
-      'Return compact parameter documentation for a category of BrowserClaw tools (navigate | perceive | act | observe | manage | crawl | diagnose | network). Use when a workflow needs a tool that is not in the current profile view.',
+      'Return compact parameter documentation for a category of BrowserClaw tools (navigate | perceive | act | observe | manage | crawl | diagnose | network | power). Use when a workflow needs a tool that is not in the current profile view. The "power" category is tier 3 (javascript, cdp_execute): it is disclosed here but only unlocked for the session when activateForSession is true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2851,6 +2851,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
             'crawl',
             'diagnose',
             'network',
+            'power',
           ],
           description: 'Tool category to document',
         },
