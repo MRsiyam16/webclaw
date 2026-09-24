@@ -73,6 +73,10 @@ interface ScreenshotToolParams {
   som?: boolean; // Overlay Set-of-Mark numbered badges on interactive elements before capture
   highlight?: boolean; // Alias for som
   setOfMark?: boolean; // Alias for som
+  /** Capture mode. 'som' = Set-of-Mark: annotated image + textual element map on ONE shared numbering scheme */
+  mode?: 'som' | string;
+  /** Zoom crop mode: label numbers to zoom into (crop around each label's safe click point, scaled up) */
+  zoom?: number[];
   /** View a single visual asset listed by chrome_read_dom (1-based asset index). Bytes first, viewport-crop fallback */
   assetIndex?: number;
   /** Sub-region ROI crop (lossless zoom into specified bounding box [ymin, xmin, ymax, xmax] or { x0, y0, x1, y1 }) */
@@ -308,6 +312,265 @@ async function saveScreenshotToNativeTemp(
 }
 
 /**
+ * A single Set-of-Mark label. The SAME array of labels feeds both the numbered
+ * marks drawn onto the screenshot image and the textual element map, so the
+ * numbering can never desync between the two representations.
+ */
+export interface SomLabel {
+  n: number;
+  tag: string;
+  name: string;
+  x: number;
+  y: number;
+}
+
+/** Result of safe-click-point resolution. `occluded` is true when samples were covered. */
+export interface ResolvedClickPoint {
+  x: number;
+  y: number;
+  occluded: boolean;
+}
+
+export type ZoomResolution = { ok: true; targets: SomLabel[] } | { ok: false; error: string };
+
+/** 3x3 grid sampled at 15% / 50% / 85% of width and height (the 9-point map). */
+const SOM_SAFE_GRID_RATIOS = [0.15, 0.5, 0.85] as const;
+
+/**
+ * Renders the textual element map. Each line is exactly `[<n>] <tag> – <name>`
+ * (en-dash U+2013 between tag and name).
+ */
+export function buildElementMap(labels: SomLabel[]): string[] {
+  return labels.map((label) => `[${label.n}] ${label.tag} – ${label.name}`);
+}
+
+/** True when the hit element is the element itself or one of its descendants (composed-tree aware). */
+function isSelfOrDescendant(el: Element, hit: Element | null): boolean {
+  let current: Element | null = hit;
+  while (current) {
+    if (current === el) return true;
+    const root = current.getRootNode ? current.getRootNode() : null;
+    const host = root && (root as any).nodeType === 11 ? (root as any).host : null;
+    current = current.parentElement || host || null;
+  }
+  return false;
+}
+
+/**
+ * Resolves a safe click point for an element using document.elementFromPoint
+ * sampling over the 9-point map. The returned point is one where
+ * elementFromPoint resolves to the element ITSELF (or its descendant) — never a
+ * sticky header / modal covering it. The naive geometric centre is returned
+ * only when no sampled point is clear, and then `occluded` is set to true.
+ */
+export function resolveClickPoint(el: Element): ResolvedClickPoint {
+  const rect = el.getBoundingClientRect();
+  const centre = {
+    x: Math.round(rect.left + rect.width / 2),
+    y: Math.round(rect.top + rect.height / 2),
+  };
+
+  if (!rect || rect.width <= 0 || rect.height <= 0) {
+    return { x: centre.x, y: centre.y, occluded: false };
+  }
+
+  const clearPoints: Array<{ x: number; y: number }> = [];
+  let centreClear = false;
+
+  for (const ry of SOM_SAFE_GRID_RATIOS) {
+    for (const rx of SOM_SAFE_GRID_RATIOS) {
+      const px = Math.round(rect.left + rect.width * rx);
+      const py = Math.round(rect.top + rect.height * ry);
+      let hit: Element | null = null;
+      try {
+        hit =
+          typeof document.elementFromPoint === 'function'
+            ? document.elementFromPoint(px, py)
+            : null;
+      } catch {
+        hit = null;
+      }
+      if (!hit || isSelfOrDescendant(el, hit)) {
+        clearPoints.push({ x: px, y: py });
+        if (rx === 0.5 && ry === 0.5) centreClear = true;
+      }
+    }
+  }
+
+  // Every sampled point is covered: return the best point from the map (the
+  // geometric centre) and flag it, rather than silently pretending it is safe.
+  if (clearPoints.length === 0) {
+    return { x: centre.x, y: centre.y, occluded: true };
+  }
+
+  // A clear point was found: the returned point is not occluded. The flag
+  // describes the returned point, not whether some other sample was covered.
+  if (centreClear) {
+    return { x: centre.x, y: centre.y, occluded: false };
+  }
+
+  // NEVER fall back to the naive geometric centre when the map has a hit:
+  // pick the clear sample closest to the centre (ties keep enumeration order).
+  let best = clearPoints[0];
+  let bestDistance = Infinity;
+  for (const point of clearPoints) {
+    const distance = Math.hypot(point.x - centre.x, point.y - centre.y);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = point;
+    }
+  }
+  return { x: best.x, y: best.y, occluded: false };
+}
+
+/** Resolves requested zoom label numbers to their labels, erroring with the valid set. */
+export function resolveZoomTargets(labels: SomLabel[], requested: number[]): ZoomResolution {
+  const byNumber = new Map(labels.map((label) => [label.n, label]));
+  const unknown = requested.filter((n) => !byNumber.has(n));
+  if (unknown.length > 0) {
+    const valid = labels.map((label) => label.n).join(', ');
+    return {
+      ok: false,
+      error: `Unknown Set-of-Mark label number(s): ${unknown.join(', ')}. Valid label numbers: ${valid || '(none)'}.`,
+    };
+  }
+  return { ok: true, targets: requested.map((n) => byNumber.get(n)!) };
+}
+
+function clampZoomCrop(
+  rect: { x: number; y: number; width: number; height: number },
+  viewport: { width: number; height: number },
+  scale = 2,
+  padding = 8,
+): { x: number; y: number; width: number; height: number; scale: number } | null {
+  if (!rect || !(rect.width > 0) || !(rect.height > 0)) return null;
+  const x0 = Math.max(0, Math.floor(rect.x - padding));
+  const y0 = Math.max(0, Math.floor(rect.y - padding));
+  const x1 = Math.min(viewport.width, Math.ceil(rect.x + rect.width + padding));
+  const y1 = Math.min(viewport.height, Math.ceil(rect.y + rect.height + padding));
+  const width = Math.max(1, x1 - x0);
+  const height = Math.max(1, y1 - y0);
+  return { x: x0, y: y0, width, height, scale };
+}
+
+/** Draws numbered SoM badges at each label's safe click point onto the image. */
+async function overlaySomMarkers(
+  dataUrl: string,
+  labels: SomLabel[],
+  mimeType: string,
+  quality: number,
+): Promise<string> {
+  if (typeof OffscreenCanvas === 'undefined' || labels.length === 0) return dataUrl;
+  try {
+    const img = await createImageBitmapFromUrl(dataUrl);
+    const canvas = new OffscreenCanvas(img.width, img.height);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return dataUrl;
+    ctx.drawImage(img, 0, 0);
+    const radius = Math.max(9, Math.min(18, Math.round(Math.min(img.width, img.height) / 55)));
+    ctx.font = `bold ${Math.round(radius * 1.1)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (const label of labels) {
+      if (label.x < 0 || label.y < 0 || label.x > img.width || label.y > img.height) continue;
+      ctx.beginPath();
+      ctx.arc(label.x, label.y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(226, 38, 38, 0.88)';
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+      ctx.stroke();
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(String(label.n), label.x, label.y);
+    }
+    return await canvasToDataURL(canvas, mimeType as any, quality);
+  } catch (err) {
+    console.warn('Failed to overlay Set-of-Mark markers:', err);
+    return dataUrl;
+  }
+}
+
+/** Crops and upscales one region of the captured image. */
+async function cropZoomRegion(
+  dataUrl: string,
+  crop: { x: number; y: number; width: number; height: number; scale: number },
+  mimeType: string,
+  quality: number,
+  maxDimension = 1600,
+): Promise<string | null> {
+  if (typeof OffscreenCanvas === 'undefined') return null;
+  try {
+    const img = await createImageBitmapFromUrl(dataUrl);
+    const outWidth = Math.max(1, Math.min(maxDimension, Math.round(crop.width * crop.scale)));
+    const outHeight = Math.max(1, Math.min(maxDimension, Math.round(crop.height * crop.scale)));
+    const canvas = new OffscreenCanvas(outWidth, outHeight);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(img, crop.x, crop.y, crop.width, crop.height, 0, 0, outWidth, outHeight);
+    return await canvasToDataURL(canvas, mimeType as any, quality);
+  } catch (err) {
+    console.warn('Failed to produce zoom crop:', err);
+    return null;
+  }
+}
+
+/**
+ * Builds SoM labels (one shared array) from the indexed elements returned by
+ * inPageDOMPruner. Subframe indices are offset exactly like the badge reindex
+ * pass so the numbering matches the drawn badges.
+ */
+function buildSomLabelsFromResults(somResults: any[]): {
+  labels: SomLabel[];
+  rects: Map<number, { x: number; y: number; width: number; height: number }>;
+} {
+  const labels: SomLabel[] = [];
+  const rects = new Map<number, { x: number; y: number; width: number; height: number }>();
+  if (!Array.isArray(somResults) || somResults.length === 0) return { labels, rects };
+
+  const mainFrame = somResults.find((r) => r.frameId === 0) || somResults[0];
+  const ordered = [mainFrame, ...somResults.filter((r) => r !== mainFrame)];
+  let runningIndex = (mainFrame?.result?.indexedElements?.length || 0) + 1;
+
+  for (const frame of ordered) {
+    const elements = frame?.result?.indexedElements;
+    if (!Array.isArray(elements)) continue;
+    const offset = frame === mainFrame ? 0 : runningIndex - 1;
+    if (frame !== mainFrame) runningIndex += elements.length;
+    for (const el of elements) {
+      const n = Number(el?.index) + offset;
+      if (!Number.isFinite(n) || n <= 0) continue;
+      const tag = String(el?.tagName || el?.tag || 'element').toLowerCase();
+      const name =
+        String(
+          el?.text ||
+            el?.attributes?.['aria-label'] ||
+            el?.attributes?.name ||
+            el?.attributes?.placeholder ||
+            el?.role ||
+            '',
+        ).trim() || tag;
+      const safePoint = el?.safeClickPoint || el?.rect || { x: 0, y: 0 };
+      labels.push({
+        n,
+        tag,
+        name,
+        x: Math.round(Number(safePoint.x) || 0),
+        y: Math.round(Number(safePoint.y) || 0),
+      });
+      const rect = el?.rect || {};
+      rects.set(n, {
+        x: Number(rect.x) || 0,
+        y: Number(rect.y) || 0,
+        width: Number(rect.width) || 0,
+        height: Number(rect.height) || 0,
+      });
+    }
+  }
+  return { labels, rects };
+}
+
+/**
  * Tool for capturing screenshots of web pages
  */
 class ScreenshotTool extends BaseBrowserToolExecutor {
@@ -324,10 +587,13 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
           ? (rawArgs as any).index
           : undefined;
     const grid = rawArgs.grid ?? (rawArgs as any).enableGrid;
+    const zoomRequested = Array.isArray(rawArgs.zoom) ? rawArgs.zoom : undefined;
     const som =
       rawArgs.som === true ||
       (rawArgs as any).highlight === true ||
-      (rawArgs as any).setOfMark === true;
+      (rawArgs as any).setOfMark === true ||
+      (rawArgs as any).mode === 'som' ||
+      (zoomRequested?.length ?? 0) > 0;
 
     const args: ScreenshotToolParams = {
       ...rawArgs,
@@ -372,11 +638,20 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
     let pageDetails: ScreenshotPageDetails | undefined;
 
     let elementCropOrigin: { x: number; y: number } | undefined;
+    // Set-of-Mark: ONE shared labels array feeds both the drawn marks and the element map.
+    let somLabels: SomLabel[] = [];
+    let enableSoM = false;
+    const somRects = new Map<number, { x: number; y: number; width: number; height: number }>();
+    const somZoomImages: Array<{
+      n: number;
+      crop: { x: number; y: number; width: number; height: number; scale: number };
+      dataUrl: string;
+    }> = [];
     const qualityFraction =
       typeof args.quality === 'number' ? Math.max(0, Math.min(1, args.quality / 100)) : 0.8;
 
     try {
-      const enableSoM = args.som === true || args.highlight === true || args.setOfMark === true;
+      enableSoM = args.som === true;
       if (enableSoM) {
         try {
           const somResults = await executeInPage(
@@ -412,6 +687,12 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
               }
             }
           }
+
+          // Build the ONE shared labels array from the pruned elements. Both the
+          // drawn marks and the textual element map derive from this array.
+          const built = buildSomLabelsFromResults(somResults as any[]);
+          somLabels = built.labels;
+          for (const [n, rect] of built.rects) somRects.set(n, rect);
         } catch (somErr) {
           console.warn('Failed to render Set-of-Mark badges for screenshot:', somErr);
         }
@@ -825,6 +1106,44 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
         }
       }
 
+      // 1.6. Set-of-Mark: draw numbered marks from the SAME labels array as the element map
+      if (enableSoM && finalImageDataUrl && somLabels.length > 0) {
+        const markerMime =
+          format === 'png' ? 'image/png' : format === 'jpeg' ? 'image/jpeg' : targetMimeType;
+        finalImageDataUrl = await overlaySomMarkers(
+          finalImageDataUrl,
+          somLabels,
+          markerMime,
+          qualityFraction,
+        );
+      }
+
+      // 1.7. Zoom crop mode: crop around each requested label's safe click point
+      if (zoomRequested && zoomRequested.length > 0 && finalImageDataUrl) {
+        const resolution = resolveZoomTargets(somLabels, zoomRequested);
+        if (!resolution.ok) {
+          return createErrorResponse(resolution.error);
+        }
+        const viewport = {
+          width: pageDetails?.viewportWidth ?? finalImageWidthCss ?? 0,
+          height: pageDetails?.viewportHeight ?? finalImageHeightCss ?? 0,
+        };
+        const zoomMime =
+          format === 'png' ? 'image/png' : format === 'jpeg' ? 'image/jpeg' : targetMimeType;
+        for (const target of resolution.targets) {
+          const rect = somRects.get(target.n) || {
+            x: target.x - 40,
+            y: target.y - 40,
+            width: 80,
+            height: 80,
+          };
+          const crop = clampZoomCrop(rect, viewport);
+          if (!crop) continue;
+          const dataUrl = await cropZoomRegion(finalImageDataUrl, crop, zoomMime, 0.92);
+          if (dataUrl) somZoomImages.push({ n: target.n, crop, dataUrl });
+        }
+      }
+
       // 2. Process output
       // Update screenshot context for coordinate scaling by tools like chrome_computer
       try {
@@ -1067,6 +1386,13 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
           assetIndex: args.assetIndex,
           grid: Boolean(args.grid),
           somApplied: didInjectSoM,
+          somMode: enableSoM ? ((zoomRequested?.length ?? 0) > 0 ? 'zoom' : 'som') : undefined,
+          elementMap: enableSoM ? buildElementMap(somLabels) : undefined,
+          somLabels: enableSoM ? somLabels : undefined,
+          zoomCrops:
+            somZoomImages.length > 0
+              ? somZoomImages.map((z) => ({ n: z.n, ...z.crop }))
+              : undefined,
           ...(storeBase64 === true ? { base64Data } : {}),
           ...results,
           ...(isThumbnailFinal
@@ -1092,6 +1418,17 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
         width: finalImageWidthCss || 800,
         height: finalImageHeightCss || 600,
         dataBase64: finalBase64,
+      });
+    }
+
+    // Zoom crop mode: append one upscaled crop per requested Set-of-Mark label.
+    for (const zoom of somZoomImages) {
+      const zoomBase64 = zoom.dataUrl.replace(/^data:[^;]+;base64,/, '');
+      if (!zoomBase64) continue;
+      returnContent.push({
+        type: 'image',
+        data: zoomBase64,
+        mimeType: finalMime,
       });
     }
 
