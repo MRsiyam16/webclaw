@@ -41,6 +41,36 @@ import {
 /** Bounded in-page read budget for one post-condition settle-poll attempt. */
 const POST_CONDITION_READ_TIMEOUT_MS = 1_500;
 
+/**
+ * Structured error for a call that specifies no tabId and whose session has no
+ * read/known tab to route to (DEFECT B). Acting on the global active tab in
+ * that situation clicks into whatever the user is looking at, so the ambiguity
+ * is named instead of guessed — no action is performed.
+ */
+export function buildAmbiguousTabResult(sessionId?: string): ToolResult {
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify(
+          {
+            success: false,
+            error: 'ambiguous_tab',
+            code: 'ambiguous_tab',
+            message: 'no tabId and no tab read in this session; pass tabId explicitly',
+            resolvedTabId: null,
+            tabResolution: 'unresolved',
+            sessionId: sessionId ?? null,
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+    isError: true,
+  };
+}
+
 export interface InteractIndexParams {
   index?: number;
   coordinate?: { x: number; y: number } | PolymorphicCoordinate;
@@ -337,16 +367,31 @@ export class InteractIndexTool extends BaseBrowserToolExecutor {
     }
 
     try {
+      const sessionId = args.sessionId || args.sessionContext;
       // D3: snapshot BEFORE resolveAffinityTab — its active-tab fallback binds
       // the fallback tab, so post-resolution checks always pass (live-tested).
-      const interactHadPreexistingBinding = sessionTabAffinity.hasBinding(
-        args.sessionId || args.sessionContext,
-      );
-      const tab = await this.resolveAffinityTab({
-        tabId: args.tabId,
-        windowId: args.windowId,
-        sessionId: args.sessionId || args.sessionContext,
-      });
+      const interactHadPreexistingBinding = sessionTabAffinity.hasBinding(sessionId);
+
+      // B: never act on an unspecified tab. A session-scoped call with no
+      // explicit tabId targets the tab that session read; if there is none the
+      // ambiguity is named instead of silently clicking on the active tab.
+      let tabResolution: 'explicit' | 'session_affinity' | 'active_tab_fallback';
+      let tab: chrome.tabs.Tab;
+      if (typeof args.tabId !== 'number' && sessionId) {
+        const sessionTab = await sessionTabAffinity.resolveSessionTab(sessionId);
+        if (!sessionTab?.id) {
+          return buildAmbiguousTabResult(sessionId);
+        }
+        tab = sessionTab;
+        tabResolution = 'session_affinity';
+      } else {
+        tab = await this.resolveAffinityTab({
+          tabId: args.tabId,
+          windowId: args.windowId,
+          sessionId,
+        });
+        tabResolution = typeof args.tabId === 'number' ? 'explicit' : 'active_tab_fallback';
+      }
       const tabId = tab.id;
       if (!tabId) {
         return createErrorResponse(`No active tab found for ${resolveToolName('interact_index')}`);
@@ -1355,6 +1400,10 @@ export class InteractIndexTool extends BaseBrowserToolExecutor {
                   ...(typeof networkSettled === 'boolean' ? { networkSettled } : {}),
                   screenshotCtxWarning,
                   ...(affinityWarning ? { affinityWarning } : {}),
+                  // B (additive): which tab was actually acted on, and how it was
+                  // chosen ('explicit' | 'session_affinity' | 'active_tab_fallback').
+                  resolvedTabId: tabId,
+                  tabResolution,
                   ...(delta ? { delta } : {}),
                   ...(perceptiveDelta ? { perceptiveDelta } : {}),
                   ...(deliveryVerified === undefined

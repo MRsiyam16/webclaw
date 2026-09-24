@@ -36,6 +36,36 @@ const LEGACY_REFRESH_PROSE = 'ACTION REQUIRED';
 const POST_CONDITION_READ_TIMEOUT_MS = 1_500;
 
 /**
+ * Structured error for a call that specifies no tabId and whose session has no
+ * read/known tab to route to (DEFECT B). Acting on the global active tab in
+ * that situation types into whatever the user is looking at, so the ambiguity
+ * is named instead of guessed — no action is performed.
+ */
+export function buildAmbiguousTabResult(sessionId?: string): ToolResult {
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify(
+          {
+            success: false,
+            error: 'ambiguous_tab',
+            code: 'ambiguous_tab',
+            message: 'no tabId and no tab read in this session; pass tabId explicitly',
+            resolvedTabId: null,
+            tabResolution: 'unresolved',
+            sessionId: sessionId ?? null,
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+    isError: true,
+  };
+}
+
+/**
  * Builds the chrome_fill_index response for a STALE target.
  *
  * The stale answer is the structured envelope (verdict stale_ref + recovery
@@ -109,18 +139,36 @@ export class FillIndexTool extends BaseBrowserToolExecutor {
 
     const textToFill = args.text ?? args.value ?? '';
 
+    const sessionId = args.sessionId || args.sessionContext;
+
     // D3: snapshot BEFORE resolveAffinityTab — its active-tab fallback binds
     // the fallback tab, so a post-resolution check would always see a
     // "valid" binding and never warn (verified by live testing).
-    const sidForWarning = args.sessionId || args.sessionContext;
-    const hadPreexistingBinding = sessionTabAffinity.hasBinding(sidForWarning);
+    const hadPreexistingBinding = sessionTabAffinity.hasBinding(sessionId);
 
     try {
-      const tab = await this.resolveAffinityTab({
-        tabId: args.tabId,
-        windowId: args.windowId,
-        sessionId: args.sessionId || args.sessionContext,
-      });
+      // B: never act on an unspecified tab. With a session identity but no
+      // explicit tabId, the target must be the tab that session actually read
+      // (its affinity binding, set by the read that produced these refs).
+      // resolveAffinityTab's global active-tab fallback silently typed into
+      // whatever page the user was viewing and reported success.
+      let tabResolution: 'explicit' | 'session_affinity' | 'active_tab_fallback';
+      let tab: chrome.tabs.Tab;
+      if (typeof args.tabId !== 'number' && sessionId) {
+        const sessionTab = await sessionTabAffinity.resolveSessionTab(sessionId);
+        if (!sessionTab?.id) {
+          return buildAmbiguousTabResult(sessionId);
+        }
+        tab = sessionTab;
+        tabResolution = 'session_affinity';
+      } else {
+        tab = await this.resolveAffinityTab({
+          tabId: args.tabId,
+          windowId: args.windowId,
+          sessionId,
+        });
+        tabResolution = typeof args.tabId === 'number' ? 'explicit' : 'active_tab_fallback';
+      }
       if (!tab.id) {
         return createErrorResponse(`No active tab found for ${resolveToolName('fill_index')}`);
       }
@@ -200,6 +248,10 @@ export class FillIndexTool extends BaseBrowserToolExecutor {
         }
 
         const outcome: any = { ...fillResult };
+
+        // B (additive): which tab was actually acted on, and how it was chosen.
+        (outcome as any).resolvedTabId = targetTabId;
+        (outcome as any).tabResolution = tabResolution;
 
         const shouldWaitSettle =
           args.waitForSettle ||
