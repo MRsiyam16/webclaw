@@ -23,9 +23,59 @@ import {
   buildResult,
   buildStaleRefResult,
   evaluatePostConditions,
+  type ActionResult,
   type ActionEvidence,
   type PostConditionSpec,
 } from './result-envelope';
+
+/** The legacy prose dead end this tool no longer emits on the stale path. */
+const LEGACY_REFRESH_PROSE = 'ACTION REQUIRED';
+
+/**
+ * Builds the chrome_fill_index response for a STALE target.
+ *
+ * The stale answer is the structured envelope (verdict stale_ref + recovery
+ * code/message/freshRefs). The legacy top-level field names are kept verbatim
+ * (Hyrum's law: success / index / ref / filledText / isTrusted / method / …),
+ * but the legacy "ACTION REQUIRED: call chrome_read_dom …" prose that the
+ * locator used to bury in `error` is replaced by the structured message — the
+ * prose path and the structured recovery must never be emitted side by side.
+ */
+export function buildStaleRefFillResponse(input: {
+  index: number;
+  fillResult: Record<string, unknown>;
+  envelope: ActionResult;
+}): ToolResult {
+  const { index, fillResult, envelope } = input;
+  const fallbackMessage = `ref/index [${index}] is stale; re-read the page for the current refs`;
+  const rawMessage = envelope.recovery?.message ?? fallbackMessage;
+  // Belt and braces: no legacy prose may reach the caller through any field.
+  const structuredMessage = rawMessage.includes(LEGACY_REFRESH_PROSE)
+    ? fallbackMessage
+    : rawMessage;
+
+  const { error: _legacyError, diagnostics: _legacyDiagnostics, ...fillFields } = fillResult;
+
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify(
+          {
+            success: false,
+            index,
+            ...fillFields,
+            ...envelope,
+            error: structuredMessage,
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+    isError: false,
+  };
+}
 
 export interface FillIndexParams {
   index: number;
@@ -130,24 +180,11 @@ export class FillIndexTool extends BaseBrowserToolExecutor {
                 currentUrl: previousUrl,
               },
             });
-            return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: JSON.stringify(
-                    {
-                      success: false,
-                      index: args.index,
-                      ...(fillResult as any),
-                      ...envelope,
-                    },
-                    null,
-                    2,
-                  ),
-                },
-              ],
-              isError: false,
-            };
+            return buildStaleRefFillResponse({
+              index: args.index,
+              fillResult: fillResult as any,
+              envelope,
+            });
           }
 
           return createErrorResponse(
