@@ -13,6 +13,7 @@ import { renderCompactElementLine } from './dom-indexer';
 import { waitForPageSettle } from '@/utils/action-watchdog';
 import { cdpSessionManager } from '@/utils/cdp-session-manager';
 import { scrubUrl } from '@/utils/url-sanitizer';
+import { budgetText, DEFAULT_OUTPUT_BUDGET_CHARS } from './text-budget';
 
 export interface ReadDOMParams {
   viewportThreshold?: number;
@@ -72,6 +73,13 @@ export interface ReadDOMParams {
    * [role="listitem"], li) and aggregates fragmented leaf text nodes into unified structured card summaries.
    */
   flattenCards?: boolean;
+  /**
+   * Hard character budget for the serialized response (default: 120000).
+   * Heavy SPAs can produce a pruned tree of hundreds of KB; when the payload
+   * would exceed this, the tree text is cut and the response carries
+   * `truncated: true` plus `totalChars` (the true untruncated length).
+   */
+  maxChars?: number;
 }
 
 export class ReadDOMTool extends BaseBrowserToolExecutor {
@@ -579,6 +587,36 @@ export class ReadDOMTool extends BaseBrowserToolExecutor {
       if (!args.includeDetails) {
         delete resultPayload.indexedElements;
         delete resultPayload.indexMap;
+      }
+
+      // Hard output budget (additive fields only -- every existing field keeps
+      // working). The JSON envelope is measured with an empty treeString first,
+      // so the serialized response itself stays inside maxChars instead of
+      // only the tree text it carries.
+      const maxChars =
+        typeof args.maxChars === 'number' && Number.isFinite(args.maxChars) && args.maxChars > 0
+          ? Math.floor(args.maxChars)
+          : DEFAULT_OUTPUT_BUDGET_CHARS;
+      const fullTree = typeof resultPayload.treeString === 'string' ? resultPayload.treeString : '';
+      let treeBudget = Math.max(
+        1,
+        maxChars - JSON.stringify({ ...resultPayload, treeString: '' }).length,
+      );
+      let budgetedTree = budgetText(fullTree, treeBudget);
+      if (budgetedTree.truncated) {
+        // JSON escaping (quotes, newlines) inflates the tree once serialized,
+        // so measure the real response and shrink by the exact overflow. Every
+        // pass drops at least as many serialized chars as source chars, so it
+        // converges.
+        for (let attempt = 0; attempt < 4; attempt++) {
+          resultPayload.treeString = budgetedTree.text;
+          resultPayload.truncated = true;
+          resultPayload.totalChars = budgetedTree.totalChars;
+          const overflow = JSON.stringify(resultPayload).length - maxChars;
+          if (overflow <= 0) break;
+          treeBudget = Math.max(1, treeBudget - overflow);
+          budgetedTree = budgetText(fullTree, treeBudget);
+        }
       }
 
       return {

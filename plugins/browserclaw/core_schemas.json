@@ -313,6 +313,10 @@
           "type": "number",
           "description": "Maximum text length before truncation for element text content (default: 120)"
         },
+        "maxChars": {
+          "type": "number",
+          "description": "Hard character budget for the serialized response (default: 120000). When the pruned tree would exceed it the response is cut and carries \"truncated\": true plus \"totalChars\" (the true untruncated length)."
+        },
         "includeDetails": {
           "type": "boolean",
           "description": "Also return the bulky indexedElements/indexMap detail blocks (geometry, occlusion flags, safe click points). Off by default because the tree already carries index/tag/attributes/text; enable only when you need per-element rects or visibility flags."
@@ -926,6 +930,14 @@
         "fit": {
           "type": "boolean",
           "description": "Content-only extraction: restrict to the main content region and strip nav/header/footer/aside/form noise before conversion (default: false)"
+        },
+        "selector": {
+          "type": "string",
+          "description": "CSS selector limiting markdown extraction to that subtree (querySelector) instead of the whole body"
+        },
+        "maxLength": {
+          "type": "number",
+          "description": "Hard character budget for the returned markdown (default: 120000). Longer markdown is cut and a notice carrying the true original length is appended."
         },
         "tabId": {
           "type": "number",
