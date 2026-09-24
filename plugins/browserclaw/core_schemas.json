@@ -1,5 +1,5 @@
 {
-  "get_windows_and_tabs": {
+  "chrome_get_windows_and_tabs": {
     "description": "Get all currently open browser windows and tabs",
     "inputSchema": {
       "type": "object",
