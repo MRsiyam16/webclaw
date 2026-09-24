@@ -197,6 +197,37 @@ export function postCondition(
   };
 }
 
+/**
+ * Build the stale_ref envelope for a ref/index whose node was replaced.
+ *
+ * Keeps every legacy field the tool response already had (Hyrum's Law) and ADDS
+ * verdict/outcome/recovery. `recovery.freshRefs` is the page's CURRENT indexed
+ * element list, so the caller can retry immediately without a fresh read_dom.
+ */
+export function buildStaleRefResult(input: {
+  index: number | string;
+  message: string;
+  freshRefs: IndexedElement[];
+  evidence?: Partial<ActionEvidence>;
+}): ActionResult {
+  const evidence: ActionEvidence = {
+    urlChanged: false,
+    previousUrl: '',
+    currentUrl: '',
+    ...(input.evidence || {}),
+  };
+  const message = input.message || `ref/index [${input.index}] is stale`;
+  return buildResult({
+    evidence,
+    postConditions: [],
+    recovery: {
+      code: 'stale_ref',
+      message,
+      freshRefs: Array.isArray(input.freshRefs) ? input.freshRefs : [],
+    },
+  });
+}
+
 export function buildResult(input: {
   evidence: ActionEvidence;
   postConditions: PostConditionResult[];

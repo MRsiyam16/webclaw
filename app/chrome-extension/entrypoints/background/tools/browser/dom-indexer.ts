@@ -13,6 +13,45 @@ import {
 export const DIAGNOSTIC_REFRESH_GUIDANCE = `ACTION REQUIRED: Please call '${resolveToolName('read_dom')}' to refresh the index tree before re-attempting interaction`;
 
 /**
+ * Fast-fail interaction budget. A stale ref must never burn the caller's whole
+ * turn: a bad index/ref has to surface a structured stale_ref verdict within
+ * this window instead of hanging the locator/action path.
+ */
+export const INTERACTION_TIMEOUT_MS = 10_000;
+
+/** Navigation-class operations (page load, URL change) get the longer budget. */
+export const NAVIGATION_TIMEOUT_MS = 30_000;
+
+/**
+ * Race a promise against the fast interaction budget so a bad ref fails fast
+ * instead of hanging. Rejects with a plain Error whose message is actionable.
+ */
+export async function withInteractionTimeout<T>(
+  p: Promise<T>,
+  ms: number = INTERACTION_TIMEOUT_MS,
+): Promise<T> {
+  let timer: any;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `INTERACTION_TIMEOUT: action exceeded ${ms}ms without committing — the target ref is likely stale; re-read the DOM before retrying`,
+              ),
+            ),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Isolated symbol to store element index map in the extension's execution context.
  * Prevents polluting global window scope and prevents host page hijacking.
  * Stored as WeakRef to prevent Detached DOM Trees in Blink C++ memory.
@@ -994,6 +1033,110 @@ function selfHealFindElement(fp: ElementFingerprint): Element | null {
   return searchRoot ? selfHealInShadowRoots(searchRoot, fp) : null;
 }
 
+/**
+ * Staleness signal for a ref/index that failed every resolution tier.
+ * Carries the page's CURRENT refs so the caller can retry without a re-read.
+ */
+export interface StaleRefSignal {
+  code: 'stale_ref';
+  message: string;
+  freshRefs: IndexedElement[];
+}
+
+const STALE_REF_SIGNAL_KEY = Symbol.for('__browser_use_stale_ref_signal__');
+
+/**
+ * The CURRENT indexed elements for this page: every still-connected node from
+ * the live isolated index map (and the __clawFast snapshot when present), each
+ * carrying a persistent ref that resolves immediately. Detached nodes are
+ * excluded, so a stale node can never be handed back as "fresh".
+ */
+export function getCurrentIndexedElements(): IndexedElement[] {
+  const out: IndexedElement[] = [];
+  try {
+    const refMap = getPersistentRefMap();
+    const seen = new WeakSet<object>();
+
+    const push = (key: number | string, node: Element | null | undefined) => {
+      if (!node || (typeof Element !== 'undefined' && !(node instanceof Element))) return;
+      if ((node as any).isConnected === false) return;
+      if (seen.has(node as any)) return;
+      seen.add(node as any);
+      let ref: string | undefined;
+      try {
+        ref = refMap.mint(node);
+      } catch {
+        ref = undefined;
+      }
+      out.push({
+        ref: ref ?? String(key),
+        index: typeof key === 'number' ? key : Number(key),
+        tagName: node.tagName?.toLowerCase(),
+        text: (((node as any).innerText || node.textContent || '') as string).trim().slice(0, 120),
+        isInteractive: true,
+      } as unknown as IndexedElement);
+    };
+
+    for (const [idx, entry] of Array.from(getIsolatedIndexMap().entries())) {
+      push(idx, derefElement(entry));
+    }
+
+    const nodes = (globalThis as any).__clawFast?.nodes as
+      Map<number | string, Element> | undefined;
+    if (nodes) {
+      for (const [key, node] of Array.from(nodes.entries())) {
+        push(key, node);
+      }
+    }
+  } catch {}
+  return out;
+}
+
+/**
+ * Record (and return) the stale-ref signal for `index`. Called by
+ * findIndexedElement when EVERY resolution tier fails, replacing the old
+ * prose-only "ACTION REQUIRED" dead end with structured recovery data.
+ */
+export function signalStaleRef(index: number | string, reason?: string): StaleRefSignal {
+  const signal: StaleRefSignal = {
+    code: 'stale_ref',
+    message:
+      reason ??
+      `ref/index [${index}] failed every resolution tier (persistent ref map, __clawFast snapshot, fingerprint re-match, deep selector); the node behind it was replaced or removed`,
+    freshRefs: getCurrentIndexedElements(),
+  };
+  try {
+    (globalThis as any)[STALE_REF_SIGNAL_KEY] = signal;
+  } catch {}
+  return signal;
+}
+
+/** Last recorded stale-ref signal for this page, if any. */
+export function getLastStaleRefSignal(): StaleRefSignal | undefined {
+  return (globalThis as any)[STALE_REF_SIGNAL_KEY];
+}
+
+/**
+ * Resolve a ref/index for an action. On total locator failure the caller gets
+ * the stale signal (not prose), so it can answer with a stale_ref envelope
+ * carrying fresh refs for an immediate retry. Never throws.
+ */
+export function resolveIndexedElementForAction(
+  index: number | string,
+  reason?: string,
+): { element: Element | null; stale?: StaleRefSignal } {
+  let element: Element | null = null;
+  try {
+    element = findIndexedElement(index);
+  } catch {
+    element = null;
+  }
+  if (element && (typeof Element === 'undefined' || element instanceof Element)) {
+    return { element };
+  }
+  return { element: null, stale: signalStaleRef(index, reason) };
+}
+
 export function findIndexedElement(index: number | string): Element | null {
   const numIdx = typeof index === 'string' && /^\d+$/.test(index) ? parseInt(index, 10) : index;
   // Persistent refs ('e1','e2',...) resolve through the isolated ref map and are
@@ -1070,6 +1213,14 @@ export function findIndexedElement(index: number | string): Element | null {
       if (fallback) return fallback;
     } catch {}
   }
+
+  // Every resolution tier failed. The old contract handed the caller a prose
+  // string ("ACTION REQUIRED: ...") buried in an error field: the caller burned
+  // a timeout and never learned the ref was stale. Signal staleness
+  // structurally instead — see resolveIndexedElementForAction / signalStaleRef.
+  try {
+    signalStaleRef(index);
+  } catch {}
 
   return null;
 }
@@ -4558,6 +4709,12 @@ export function inPageGetElementCoordinates(refOrIndex: number | string): {
   warning?: string;
   isSelectOption?: boolean;
   error?: string;
+  /** True when every resolution tier failed: the target ref/index is stale. */
+  stale?: boolean;
+  /** One line: which ref/index failed and why (replaces the old prose string). */
+  message?: string;
+  /** The page's CURRENT refs, so the caller can retry without a re-read. */
+  freshRefs?: IndexedElement[];
 } {
   let index: number;
   if (typeof refOrIndex === 'string') {
@@ -4621,9 +4778,15 @@ export function inPageGetElementCoordinates(refOrIndex: number | string): {
   }
 
   if (!el || !(el instanceof Element)) {
+    // Total locator failure: signal staleness structurally instead of the old
+    // prose-only "ACTION REQUIRED" dead end that cost the caller a timeout.
+    const signal = signalStaleRef(index);
     return {
       success: false,
-      error: `Element with index [${index}] not found in active DOM index map. ${DIAGNOSTIC_REFRESH_GUIDANCE}`,
+      stale: true,
+      message: signal.message,
+      freshRefs: signal.freshRefs,
+      error: signal.message,
     };
   }
 

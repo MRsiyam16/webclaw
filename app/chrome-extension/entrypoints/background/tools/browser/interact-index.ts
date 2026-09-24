@@ -15,6 +15,7 @@ import {
   inPageArmDeliveryProbe,
   inPageReadDeliveryProbe,
   computePerceptiveDelta,
+  INTERACTION_TIMEOUT_MS,
 } from './dom-indexer';
 import { screenshotContextManager, scaleCoordinates } from '../../../../utils/screenshot-context';
 import { computeHumanizedPoints } from '../../../../utils/mouse-trajectory';
@@ -30,6 +31,7 @@ import { tabFaviconManager } from './tab-favicon';
 import { startActionNetworkCapture } from '../../../../utils/action-network-capture';
 import {
   buildResult,
+  buildStaleRefResult,
   evaluatePostConditions,
   type ActionEvidence,
   type PostConditionSpec,
@@ -588,7 +590,12 @@ export class InteractIndexTool extends BaseBrowserToolExecutor {
           }
         } else {
           coordResult = (
-            await executeInPage({ tabId }, 'inPageGetElementCoordinates', [args.index!])
+            await executeInPage(
+              { tabId },
+              'inPageGetElementCoordinates',
+              [args.index!],
+              INTERACTION_TIMEOUT_MS,
+            )
           )?.[0]?.result;
 
           // Check subframes if not in main frame
@@ -597,6 +604,7 @@ export class InteractIndexTool extends BaseBrowserToolExecutor {
               { tabId, allFrames: true },
               'inPageGetElementCoordinates',
               [args.index!],
+              INTERACTION_TIMEOUT_MS,
             );
             const match = frameResults.find((r) => r.result?.success);
             if (match?.result) {
@@ -627,6 +635,39 @@ export class InteractIndexTool extends BaseBrowserToolExecutor {
                   }
                 } catch {}
               }
+            } else if ((coordResult as any)?.stale) {
+              // Stale-ref recovery: the node behind this index/ref was replaced.
+              // Keep the legacy response shape (success/index/action/mode) and ADD
+              // the envelope so the caller gets fresh refs instead of prose.
+              const envelope = buildStaleRefResult({
+                index: args.index!,
+                message: (coordResult as any).message,
+                freshRefs: (coordResult as any).freshRefs ?? [],
+                evidence: {
+                  urlChanged: false,
+                  previousUrl,
+                  currentUrl: previousUrl,
+                },
+              });
+              return {
+                content: [
+                  {
+                    type: 'text' as const,
+                    text: JSON.stringify(
+                      {
+                        success: false,
+                        index: args.index ?? null,
+                        action,
+                        mode: 'dom_index',
+                        ...envelope,
+                      },
+                      null,
+                      2,
+                    ),
+                  },
+                ],
+                isError: false,
+              };
             } else {
               return createErrorResponse(
                 (coordResult?.error ||

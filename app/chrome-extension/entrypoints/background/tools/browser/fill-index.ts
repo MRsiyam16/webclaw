@@ -3,7 +3,7 @@ import { createErrorResponse, ToolResult } from '@/common/tool-handler';
 import { BaseBrowserToolExecutor } from '../base-browser';
 import { TOOL_NAMES, resolveToolName } from 'chrome-mcp-shared';
 import { executeInPage } from './in-page-engine';
-import { computePerceptiveDelta } from './dom-indexer';
+import { computePerceptiveDelta, INTERACTION_TIMEOUT_MS } from './dom-indexer';
 import { waitForPageSettle } from '@/utils/action-watchdog';
 import {
   raceCdp,
@@ -21,6 +21,7 @@ import { computeHumanizedPoints } from '@/utils/mouse-trajectory';
 import { performPhysicalFill } from './fill-core';
 import {
   buildResult,
+  buildStaleRefResult,
   evaluatePostConditions,
   type ActionEvidence,
   type PostConditionSpec,
@@ -105,6 +106,50 @@ export class FillIndexTool extends BaseBrowserToolExecutor {
         });
 
         if (!fillResult.success || fillResult.committed === false) {
+          // Stale-ref recovery: probe the locator once (bounded by the fast
+          // interaction budget). A node that was replaced must answer with fresh
+          // refs for an immediate retry, not a prose error that costs a timeout.
+          const staleProbe = await executeInPage(
+            { tabId: targetTabId },
+            'inPageGetElementCoordinates',
+            [args.index],
+            INTERACTION_TIMEOUT_MS,
+          )
+            .then((r) => r?.[0]?.result as any)
+            .catch(() => null);
+
+          if (staleProbe?.stale) {
+            const envelope = buildStaleRefResult({
+              index: args.index,
+              message: staleProbe.message,
+              freshRefs: staleProbe.freshRefs ?? [],
+              evidence: {
+                committed: false,
+                urlChanged: false,
+                previousUrl,
+                currentUrl: previousUrl,
+              },
+            });
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: JSON.stringify(
+                    {
+                      success: false,
+                      index: args.index,
+                      ...(fillResult as any),
+                      ...envelope,
+                    },
+                    null,
+                    2,
+                  ),
+                },
+              ],
+              isError: false,
+            };
+          }
+
           return createErrorResponse(
             (fillResult.error ||
               fillResult.diagnostics ||
