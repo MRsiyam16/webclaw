@@ -1579,7 +1579,7 @@ TOOL_DEFINITIONS = {
         }
     },
     "browserclaw_tool_docs": {
-        "description": "Return compact parameter documentation for a category of BrowserClaw tools (navigate | perceive | act | observe | manage | crawl | diagnose | network). Use when a workflow needs a tool that is not in the current profile view.",
+        "description": "Return compact parameter documentation for a category of BrowserClaw tools (navigate | perceive | act | observe | manage | crawl | diagnose | network | power). Use when a workflow needs a tool that is not in the current profile view. The \"power\" category is tier 3 (javascript, cdp_execute): it can read document.cookie and drive arbitrary input, so it is session-gated — it is disclosed here but only unlocked for the session when activateForSession is true.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1593,8 +1593,9 @@ TOOL_DEFINITIONS = {
                         "manage",
                         "crawl",
                         "diagnose",
-                        "network"
-                    ],
+                        "network",
+                        "power"
+                        ],
                     "description": "Tool category to document"
                 },
                 "activateForSession": {
@@ -1775,7 +1776,87 @@ TOOL_DEFINITIONS = {
             },
             "required": []
         }
-    }
+    },
+        "browserclaw_extract": {
+            "description": "Tier-2 schema-typed extraction (browser_extract): extracts the fields a JSON Schema declares from the page/HTML root, with source attribution. Each key resolves via [data-field=\"key\"] -> #key -> [name=\"key\"] -> class match -> optional per-property selector -> label text; form controls read value, other elements read textContent, and declared number/integer/boolean types are coerced. Returns { data, missing, sourceRefs } — a key with no source element is reported in missing and is never invented into data.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "schema": {
+                        "type": "object",
+                        "description": "JSON Schema object describing the fields to extract: { type: 'object', properties: { <key>: { type: 'string'|'number'|'integer'|'boolean', description?, selector? } }, required?: string[] }"
+                    },
+                    "selector": {
+                        "type": "string",
+                        "description": "CSS selector scoping extraction to a subtree (optional; defaults to the whole document)"
+                    },
+                    "tabId": {
+                        "type": "number",
+                        "description": "Target tab ID (optional, defaults to the active/affinity tab)"
+                    },
+                    "sessionId": {
+                        "type": "string",
+                        "description": "Session identifier for tab affinity binding (optional)"
+                    }
+                },
+                "required": [
+                    "schema"
+                ]
+            }
+        },
+        "browserclaw_insert_media": {
+            "description": "Injects an image or media asset from local disk, URL, or base64 into a rich-text composer (e.g. Reddit, Twitter/X, Notion, Discord, Slack, GitHub) or targeted element via synthesized ClipboardEvent(\"paste\") and DragEvent(\"drop\") containing a real File object in DataTransfer, bypassing browser clipboard security sandboxes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "filePath": {
+                        "type": "string",
+                        "description": "Absolute or relative path to the image or media file on local disk (e.g. \"C:/images/diagram.png\" or \"/tmp/photo.jpg\")"
+                    },
+                    "fileUrl": {
+                        "type": "string",
+                        "description": "Remote HTTP/HTTPS URL to fetch the image or media asset from"
+                    },
+                    "base64Data": {
+                        "type": "string",
+                        "description": "Base64-encoded media data string, optionally with \"data:<mime>;base64,\" prefix"
+                    },
+                    "fileName": {
+                        "type": "string",
+                        "description": "Optional filename to associate with the injected file (e.g. \"architecture.png\")"
+                    },
+                    "mimeType": {
+                        "type": "string",
+                        "description": "MIME type of the media (e.g. \"image/png\", \"image/jpeg\", \"image/gif\", \"image/webp\", \"image/svg+xml\"). Auto-detected if omitted."
+                    },
+                    "index": {
+                        "type": "number",
+                        "description": "1-based compact element index from browserclaw_read_dom targeting the rich-text editor or composer. Defaults to active element or discovered composer."
+                    },
+                    "selector": {
+                        "type": "string",
+                        "description": "CSS selector for the target container (optional fallback for index)"
+                    },
+                    "tabId": {
+                        "type": "number",
+                        "description": "Target tab ID (optional, defaults to active tab)"
+                    },
+                    "windowId": {
+                        "type": "number",
+                        "description": "Target window ID (optional)"
+                    },
+                    "sessionId": {
+                        "type": "string",
+                        "description": "Session identifier for tab affinity binding"
+                    },
+                    "sessionContext": {
+                        "type": "string",
+                        "description": "Optional alias for sessionId"
+                    }
+                },
+                "required": []
+            }
+        }
 }
 
 def _make_handler(tool_name: str) -> Callable:
