@@ -336,7 +336,7 @@
         },
         "deltaOnly": {
           "type": "boolean",
-          "description": "When true, returns only changed/added/removed diffs compared to the previous snapshot, saving 90%+ tokens on repeated reads."
+          "description": "Delta mode (default: true). A repeat read that sees a changed DOM returns only changed/added/removed diffs against the previous snapshot (with the baseline snapshotId), saving 90%+ tokens. Set false to always receive the full tree."
         },
         "flattenCards": {
           "type": "boolean",

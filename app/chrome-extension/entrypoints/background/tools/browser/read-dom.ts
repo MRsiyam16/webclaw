@@ -24,6 +24,11 @@ export interface ReadDOMParams {
   sessionContext?: string;
   cursor?: number;
   limit?: number;
+  /**
+   * Diff-only reads (default: true). A repeat read that sees a changed DOM
+   * returns only the changed/added/removed diff plus the baseline snapshotId.
+   * `false` is the escape hatch and always returns the full tree.
+   */
   deltaOnly?: boolean;
   maxTextLength?: number;
   format?: 'compact' | 'html' | 'fast';
@@ -439,19 +444,27 @@ export class ReadDOMTool extends BaseBrowserToolExecutor {
         mergedData.treeString += `\n[Visual Assets: ${mergedData.assets.length} found. Pass assetIndex to ${resolveToolName('screenshot')} to view one.]\n${assetLines}`;
       }
 
-      // Delta DOM support: return only changed/added/removed diffs
-      if (args.deltaOnly && tab.id) {
+      // Delta DOM support (now the default): a repeat read that sees a changed
+      // DOM returns only the changed/added/removed diff. The first read on a page
+      // has no baseline, so it returns the full tree and seeds the diff.
+      // `deltaOnly: false` is the escape hatch and always returns the full tree.
+      const explicitDelta = args.deltaOnly === true;
+      if (args.deltaOnly !== false && tab.id) {
         const diff = snapshotCacheManager.diffWithPrevious(
           tab.id,
           mergedData.indexedElements || [],
         );
-        snapshotCacheManager.setSnapshot(tab.id, {
+        const deltaSnapshot = snapshotCacheManager.setSnapshot(tab.id, {
           url: scrubUrl(tab.url || ''),
           elementCount: mergedData.elementCount,
           elements: mergedData.indexedElements,
         });
 
-        if (diff.isDelta && diff.unchanged) {
+        // Unchanged: only an explicitly opted-in caller gets the compact
+        // "unchanged" protocol. By default this falls through to the full tree,
+        // so a client that never asked for deltas cannot end up holding a
+        // partial view.
+        if (diff.isDelta && diff.unchanged && explicitDelta) {
           return {
             content: [
               {
@@ -462,6 +475,7 @@ export class ReadDOMTool extends BaseBrowserToolExecutor {
                     unchanged: true,
                     revision: diff.revision,
                     totalElements: diff.totalCurrent,
+                    snapshotId: deltaSnapshot.snapshotId,
                     message:
                       'Page DOM unchanged since last snapshot. No new or modified interactive elements.',
                   },
@@ -474,7 +488,7 @@ export class ReadDOMTool extends BaseBrowserToolExecutor {
           };
         }
 
-        if (diff.isDelta) {
+        if (diff.isDelta && !diff.unchanged) {
           return {
             content: [
               {
@@ -484,6 +498,7 @@ export class ReadDOMTool extends BaseBrowserToolExecutor {
                     success: true,
                     isDelta: true,
                     revision: diff.revision,
+                    snapshotId: deltaSnapshot.snapshotId,
                     addedCount: diff.added.length,
                     modifiedCount: diff.modified.length,
                     removedIndices: diff.removed,

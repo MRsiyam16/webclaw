@@ -141,7 +141,9 @@ describe('chrome_read_dom payload shape', () => {
       title: 'X',
     });
 
-    const res = await mod.readDOMTool.execute({ includeDetails: true } as any);
+    // The asset lines only exist in the full tree, so this case opts out of
+    // the now-default delta read (which returns the diff, not the tree).
+    const res = await mod.readDOMTool.execute({ includeDetails: true, deltaOnly: false } as any);
     spy.mockRestore();
 
     const payload = JSON.parse(res.content[0].text as string);
