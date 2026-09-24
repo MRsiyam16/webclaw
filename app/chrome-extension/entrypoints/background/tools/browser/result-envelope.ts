@@ -196,6 +196,95 @@ export function evaluatePostConditions(
   });
 }
 
+/**
+ * Post-actions need a bounded settle window before they may declare failure.
+ *
+ * A submit handler that flips a marker / mounts a node / rewrites the URL often
+ * does so a frame or two after the action returns; reading once and reporting
+ * passed:false turns a working action into a false negative that makes the
+ * caller retry something already done. 4 reads over 3 waits of 200ms cap the
+ * added latency at 600ms (well under an 800ms budget) and stop early the moment
+ * every pollable condition is satisfied.
+ */
+export const POST_CONDITION_POLL_ATTEMPTS = 4;
+export const POST_CONDITION_POLL_INTERVAL_MS = 200;
+
+/** Conditions whose `actual` comes from page state that can settle asynchronously. */
+const POLLABLE_POST_CONDITION_KINDS: PostConditionKind[] = [
+  'text_present',
+  'element_exists',
+  'element_state',
+  'url_matches',
+];
+
+export function isPollablePostCondition(condition: PostConditionKind): boolean {
+  return POLLABLE_POST_CONDITION_KINDS.includes(condition);
+}
+
+export interface SettlePolledPostConditions {
+  postConditions: PostConditionResult[];
+  /** Number of reads performed (1 = no settling was needed). */
+  attempts: number;
+  /** Total time spent waiting between reads. */
+  waitedMs: number;
+  polled: boolean;
+}
+
+const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+function withPollEvidence(evidence: unknown, attempts: number, waitedMs: number): unknown {
+  const meta = { attempts, waitedMs, polled: attempts > 1 };
+  if (evidence && typeof evidence === 'object' && !Array.isArray(evidence)) {
+    return { ...(evidence as Record<string, unknown>), ...meta };
+  }
+  // text_present carries a matched snippet (string); keep it, add the counters.
+  return { snippet: evidence ?? null, ...meta };
+}
+
+/**
+ * Evaluate post-conditions, re-reading the page for a SHORT bounded window
+ * before a pollable condition is allowed to report passed:false.
+ */
+export async function evaluatePostConditionsWithSettlePoll(
+  specs: PostConditionSpec[],
+  readContext: () => Promise<PostConditionContext>,
+  options: {
+    attempts?: number;
+    intervalMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+  } = {},
+): Promise<SettlePolledPostConditions> {
+  const attempts = Math.max(1, options.attempts ?? POST_CONDITION_POLL_ATTEMPTS);
+  const intervalMs = Math.max(0, options.intervalMs ?? POST_CONDITION_POLL_INTERVAL_MS);
+  const sleep = options.sleep ?? defaultSleep;
+  const needsPoll = (specs || []).some((spec) => isPollablePostCondition(spec.condition));
+
+  let results = evaluatePostConditions(specs, await readContext());
+  let used = 1;
+  let waitedMs = 0;
+
+  if (needsPoll) {
+    while (used < attempts) {
+      const unresolved = results.some(
+        (r) => !r.passed && isPollablePostCondition(r.condition),
+      );
+      if (!unresolved) break;
+      await sleep(intervalMs);
+      waitedMs += intervalMs;
+      results = evaluatePostConditions(specs, await readContext());
+      used += 1;
+    }
+  }
+
+  const postConditions = results.map((r) =>
+    isPollablePostCondition(r.condition)
+      ? { ...r, evidence: withPollEvidence(r.evidence, used, waitedMs) }
+      : r,
+  );
+
+  return { postConditions, attempts: used, waitedMs, polled: used > 1 };
+}
+
 export interface ActionResult<T = unknown> {
   verdict: Verdict;
   outcome: string;

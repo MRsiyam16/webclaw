@@ -22,14 +22,18 @@ import { performPhysicalFill } from './fill-core';
 import {
   buildResult,
   buildStaleRefResult,
-  evaluatePostConditions,
+  evaluatePostConditionsWithSettlePoll,
   type ActionResult,
   type ActionEvidence,
+  type PostConditionContext,
   type PostConditionSpec,
 } from './result-envelope';
 
 /** The legacy prose dead end this tool no longer emits on the stale path. */
 const LEGACY_REFRESH_PROSE = 'ACTION REQUIRED';
+
+/** Bounded in-page read budget for one post-condition settle-poll attempt. */
+const POST_CONDITION_READ_TIMEOUT_MS = 1_500;
 
 /**
  * Builds the chrome_fill_index response for a STALE target.
@@ -350,37 +354,95 @@ export class FillIndexTool extends BaseBrowserToolExecutor {
         // evaluate the caller's specs, and merge the envelope fields onto the
         // existing response WITHOUT touching any legacy field.
         if (Array.isArray(args.postConditions) && args.postConditions.length > 0) {
-          let readBackValue: string | undefined;
-          let readBackAvailable = false;
-          try {
-            const verifyRes = await executeInPage(
-              { tabId: targetTabId },
-              'inPageVerifyInputCommitment',
-              [args.index, textToFill],
-            );
-            const vRes = verifyRes?.[0]?.result as any;
-            if (vRes && typeof vRes.currentValue === 'string') {
-              readBackValue = vRes.currentValue;
+          const needs = new Set(args.postConditions.map((s) => s.condition));
+          const readContext = async (): Promise<PostConditionContext> => {
+            let readBackValue: string | undefined;
+            let readBackAvailable = false;
+            if (needs.has('value_equals')) {
+              try {
+                const verifyRes = await executeInPage(
+                  { tabId: targetTabId },
+                  'inPageVerifyInputCommitment',
+                  [args.index, textToFill],
+                );
+                const vRes = verifyRes?.[0]?.result as any;
+                if (vRes && typeof vRes.currentValue === 'string') {
+                  readBackValue = vRes.currentValue;
+                  readBackAvailable = true;
+                }
+              } catch {}
+            } else {
               readBackAvailable = true;
             }
-          } catch {}
 
-          // A1: a submit that navigated replaced the document, so index [N] now
-          // resolves against the NEW page — the live Wikipedia case read the new
-          // page's empty search box and reported a successful fill as 'failed'.
-          // The engine's own commitment verification (it refuses to report
-          // committed otherwise) is the read-back taken BEFORE the submit, so a
-          // value assertion is evaluated from that instead of the post-nav DOM.
-          const navigated = urlChanged || !readBackAvailable;
-          const preNavReadBack =
-            navigated && fillResult.committed === true ? textToFill : undefined;
+            // A1: a submit that navigated replaced the document, so index [N] now
+            // resolves against the NEW page — the live Wikipedia case read the new
+            // page's empty search box and reported a successful fill as 'failed'.
+            // The engine's own commitment verification (it refuses to report
+            // committed otherwise) is the read-back taken BEFORE the submit, so a
+            // value assertion is evaluated from that instead of the post-nav DOM.
+            const navigated = urlChanged || !readBackAvailable;
+            const preNavReadBack =
+              navigated && fillResult.committed === true ? textToFill : undefined;
 
-          const postConditions = evaluatePostConditions(args.postConditions, {
-            readBackValue,
-            url: currentUrl,
-            navigated,
-            preNavReadBack,
-          });
+            let pageText: string | undefined;
+            if (needs.has('text_present')) {
+              try {
+                const textRes = await executeInPage<string>(
+                  { tabId: targetTabId },
+                  'inPageExtractDeepPageText',
+                  [],
+                  POST_CONDITION_READ_TIMEOUT_MS,
+                );
+                const text = textRes?.[0]?.result;
+                if (typeof text === 'string') pageText = text;
+              } catch {}
+            }
+
+            let elementExists: boolean | undefined;
+            let elementState: string | undefined;
+            if (needs.has('element_exists') || needs.has('element_state')) {
+              try {
+                const recheck = (
+                  await executeInPage(
+                    { tabId: targetTabId },
+                    'inPageGetElementCoordinates',
+                    [args.index],
+                    POST_CONDITION_READ_TIMEOUT_MS,
+                  )
+                )?.[0]?.result as any;
+                elementExists = Boolean(recheck?.success);
+                elementState = recheck?.success ? 'present' : 'detached';
+              } catch {}
+            }
+
+            let url = currentUrl;
+            if (needs.has('url_matches')) {
+              try {
+                const t = await chrome.tabs.get(targetTabId);
+                if (t?.url) url = t.url;
+              } catch {}
+            }
+
+            return {
+              readBackValue,
+              url,
+              navigated,
+              preNavReadBack,
+              pageText,
+              elementExists,
+              elementState,
+            };
+          };
+
+          // A2: re-read for a short bounded window before a pollable condition is
+          // allowed to report failure (the fixture flips its marker in the submit
+          // handler, after the action already returned).
+          const settled = await evaluatePostConditionsWithSettlePoll(
+            args.postConditions,
+            readContext,
+          );
+          const postConditions = settled.postConditions;
           const evidence: ActionEvidence = {
             committed: fillResult.committed === true,
             method: fillResult.method,

@@ -32,10 +32,14 @@ import { startActionNetworkCapture } from '../../../../utils/action-network-capt
 import {
   buildResult,
   buildStaleRefResult,
-  evaluatePostConditions,
+  evaluatePostConditionsWithSettlePoll,
   type ActionEvidence,
+  type PostConditionContext,
   type PostConditionSpec,
 } from './result-envelope';
+
+/** Bounded in-page read budget for one post-condition settle-poll attempt. */
+const POST_CONDITION_READ_TIMEOUT_MS = 1_500;
 
 export interface InteractIndexParams {
   index?: number;
@@ -1251,22 +1255,61 @@ export class InteractIndexTool extends BaseBrowserToolExecutor {
         // WITHOUT touching any legacy field.
         let postConditionEnvelope: ReturnType<typeof buildResult> | undefined;
         if (Array.isArray(args.postConditions) && args.postConditions.length > 0) {
-          let elementExists: boolean | undefined;
-          let elementState: string | undefined;
-          if (typeof args.index === 'number' && args.index > 0) {
-            try {
-              const recheck = (
-                await executeInPage(targetScope, 'inPageGetElementCoordinates', [args.index])
-              )?.[0]?.result as any;
-              elementExists = Boolean(recheck?.success);
-              elementState = recheck?.success ? 'present' : 'detached';
-            } catch {}
-          }
-          const postConditions = evaluatePostConditions(args.postConditions, {
-            url: currentUrl,
-            elementExists,
-            elementState,
-          });
+          const needs = new Set(args.postConditions.map((s) => s.condition));
+          const readContext = async (): Promise<PostConditionContext> => {
+            let elementExists: boolean | undefined;
+            let elementState: string | undefined;
+            if (
+              (needs.has('element_exists') || needs.has('element_state')) &&
+              typeof args.index === 'number' &&
+              args.index > 0
+            ) {
+              try {
+                const recheck = (
+                  await executeInPage(
+                    targetScope,
+                    'inPageGetElementCoordinates',
+                    [args.index],
+                    POST_CONDITION_READ_TIMEOUT_MS,
+                  )
+                )?.[0]?.result as any;
+                elementExists = Boolean(recheck?.success);
+                elementState = recheck?.success ? 'present' : 'detached';
+              } catch {}
+            }
+
+            let pageText: string | undefined;
+            if (needs.has('text_present')) {
+              try {
+                const textRes = await executeInPage<string>(
+                  { tabId },
+                  'inPageExtractDeepPageText',
+                  [],
+                  POST_CONDITION_READ_TIMEOUT_MS,
+                );
+                const text = textRes?.[0]?.result;
+                if (typeof text === 'string') pageText = text;
+              } catch {}
+            }
+
+            let url = currentUrl;
+            if (needs.has('url_matches')) {
+              try {
+                const t = await chrome.tabs.get(tabId);
+                if (t?.url) url = t.url;
+              } catch {}
+            }
+
+            return { url, elementExists, elementState, pageText };
+          };
+
+          // A2: a click that mounts a node / rewrites the URL settles a frame or
+          // two later; re-read for a short bounded window before failing.
+          const settled = await evaluatePostConditionsWithSettlePoll(
+            args.postConditions,
+            readContext,
+          );
+          const postConditions = settled.postConditions;
           const evidence: ActionEvidence = {
             isTrusted: usedNativeCDP,
             urlChanged,
