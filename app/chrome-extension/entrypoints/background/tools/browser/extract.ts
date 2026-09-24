@@ -4,7 +4,9 @@
  * Contract:
  *  - extractFrom(root, schema) -> { data, missing, sourceRefs, error? }
  *  - sourceRefs values must match /^e\d+$/
- *  - property lookup order: [data-field="key"] -> #key -> [name="key"] -> label(text contains key)
+ *  - property lookup order: [data-field="key"] -> #key -> [name="key"] -> [itemprop="key"]
+ *    -> an attribute NAMED "key" (e.g. `<a title="Book Name">` for `title`, `alt`, `aria-label`)
+ *    -> class name -> property selector -> a card heading (title-ish keys) -> label text
  *  - labels resolve via `for` -> element, else a wrapped form control inside the label
  *  - inputs/textarea/select read `value` (select: selected option value/text)
  *  - other elements read textContent (trimmed)
@@ -22,8 +24,11 @@
  *  - {"type":"array","items":{"type":"object","properties":{...}}} extracts EVERY
  *    repeated item in one call -> { data: { items: [ {...}, ... ] } } with
  *    per-value refs keyed by path (`items[0].title`).
- *  - item roots are discovered as the deepest repeated sibling group that covers
- *    the declared properties; no selector is required.
+ *  - item roots are discovered by scoring repeated sibling groups on how many
+ *    DECLARED PROPERTIES they can supply across their items; the highest score wins,
+ *    a score tie goes to the group with MORE items (never to the deepest group),
+ *    remaining ties to the shallowest group. `selector`, when passed, PINS the item
+ *    roots to every element it matches (escape hatch).
  *  - an item that cannot yield a declared property keeps it absent and records the
  *    path (`items[3].price`) in `missing` — never invents a value.
  *
@@ -260,29 +265,159 @@ function refFor(el: Element): string {
 interface Located {
   el: Element;
   ref: string;
+  /** When set, the value is read from this attribute instead of the element text. */
+  attr?: string;
+}
+
+/** Heading-ish keys whose value a card's own heading (or alt/aria-label) can supply. */
+const HEADING_KEYS = new Set([
+  'title',
+  'name',
+  'heading',
+  'headline',
+  'caption',
+  'label',
+  'subject',
+  'productname',
+  'booktitle',
+]);
+const HEADING_SELECTOR = 'h1,h2,h3,h4,h5,h6';
+/** How many ancestor levels the "nearest ancestor card heading" fallback may climb. */
+const HEADING_ANCESTOR_DEPTH = 3;
+
+/**
+ * An attribute whose NAME equals the declared key (case/separator-insensitive),
+ * e.g. key `title` -> `<a title="Book Name">`, key `alt` -> `<img alt="…">`.
+ * The value is read from that attribute, never from the element's innerText.
+ */
+function attributeNameHit(el: Element, key: string): string | undefined {
+  const target = normalizeKey(key);
+  if (target.length === 0) return undefined;
+  for (const attr of Array.from(el.attributes)) {
+    if (normalizeKey(attr.name) === target && attr.value.trim().length > 0) return attr.name;
+  }
+  return undefined;
+}
+
+/** Elements carrying an exact `itemprop="<key>"`; microdata `content` wins over text. */
+function allByItemprop(root: ParentNode, key: string): SourceHit[] {
+  const target = normalizeKey(key);
+  if (target.length === 0) return [];
+  const out: SourceHit[] = [];
+  for (const el of Array.from(root.querySelectorAll('[itemprop]'))) {
+    const value = el.getAttribute('itemprop');
+    if (!value || normalizeKey(value) !== target) continue;
+    out.push(el.hasAttribute('content') ? { el, attr: 'content' } : { el });
+  }
+  return out;
+}
+
+interface SourceHit {
+  el: Element;
+  attr?: string;
+}
+
+/** The readable text of a hit — an attribute value is short, an innerText blob is not. */
+function hitLength(hit: SourceHit): number {
+  const raw = hit.attr ? (hit.el.getAttribute(hit.attr) ?? '') : (hit.el.textContent ?? '');
+  return raw.trim().length;
+}
+
+/** Prefer the SHORTEST matching source inside a tier (an attribute over an innerText blob). */
+function byShortest(hits: SourceHit[]): SourceHit[] {
+  return hits
+    .map((hit, index) => ({ hit, index, len: hitLength(hit) }))
+    .sort((a, b) => (a.len === b.len ? a.index - b.index : a.len - b.len))
+    .map((entry) => entry.hit);
+}
+
+/**
+ * The nearest heading for a heading-ish key: inside the scope first, then up to a
+ * few ancestor "card" levels, then non-empty `alt` / `aria-label` attributes.
+ */
+function headingFallbacks(root: ParentNode, key: string): SourceHit[] {
+  if (!HEADING_KEYS.has(normalizeKey(key))) return [];
+  const hits: SourceHit[] = [];
+
+  const own = root.querySelector(HEADING_SELECTOR);
+  if (own) hits.push({ el: own });
+
+  let node: Element | null = (root as Element)?.parentElement ?? null;
+  for (let depth = 0; node && depth < HEADING_ANCESTOR_DEPTH; depth += 1) {
+    // Only the ancestor's OWN heading (a direct child), never a heading that
+    // belongs to a sibling card.
+    const heading = Array.from(node.children).find((child) => /^H[1-6]$/.test(child.tagName));
+    if (heading) {
+      hits.push({ el: heading });
+      break;
+    }
+    node = node.parentElement;
+  }
+
+  for (const el of Array.from(root.querySelectorAll('[alt]'))) {
+    if (el.getAttribute('alt')?.trim()) hits.push({ el, attr: 'alt' });
+  }
+  for (const el of Array.from(root.querySelectorAll('[aria-label]'))) {
+    if (el.getAttribute('aria-label')?.trim()) hits.push({ el, attr: 'aria-label' });
+  }
+
+  return hits;
 }
 
 /** Every element that could source `key`, in contract lookup-priority order. */
-function allSources(root: ParentNode, key: string, prop: JsonSchemaProperty): Element[] {
-  const found: Element[] = [];
-  const push = (el: Element | null | undefined) => {
-    if (el && !found.includes(el)) found.push(el);
-  };
+function allSourceHits(root: ParentNode, key: string, prop: JsonSchemaProperty): SourceHit[] {
+  const tiers: SourceHit[][] = [];
+  const seen = new Set<Element>();
+  const dedupe = (hits: SourceHit[]): SourceHit[] =>
+    hits.filter((hit) => (seen.has(hit.el) ? false : (seen.add(hit.el), true)));
 
-  push(findByAttr(root, 'data-field', key));
-  push(findById(root, key));
-  push(findByAttr(root, 'name', key));
-  for (const el of allByClass(root, key)) push(el);
-  if (prop?.selector) push(root.querySelector(prop.selector));
-  push(findByLabel(root, key));
+  // 1. Explicit field markers.
+  tiers.push(
+    [findByAttr(root, 'data-field', key), findById(root, key), findByAttr(root, 'name', key)]
+      .filter((el): el is Element => Boolean(el))
+      .map((el) => ({ el })),
+  );
 
-  return found;
+  // 2. Microdata declaration.
+  tiers.push(allByItemprop(root, key));
+
+  // 3. Attribute-NAME match: <a title="Book Name"> supplies `title`, alt supplies `alt`, ...
+  const attrHits: SourceHit[] = [];
+  for (const el of Array.from(root.querySelectorAll('*'))) {
+    const attr = attributeNameHit(el, key);
+    if (attr) attrHits.push({ el, attr });
+  }
+  tiers.push(byShortest(attrHits));
+
+  // 4. Class-name match (the historical tier) — shortest readable text wins inside it.
+  tiers.push(byShortest(allByClass(root, key).map((el) => ({ el }))));
+
+  // 5. Caller-declared per-property selector.
+  if (prop?.selector) {
+    const el = root.querySelector(prop.selector);
+    tiers.push(el ? [{ el }] : []);
+  }
+
+  // 6. Heading / alt / aria-label fallback for heading-ish keys.
+  tiers.push(headingFallbacks(root, key));
+
+  // 7. Label text.
+  const labelled = findByLabel(root, key);
+  tiers.push(labelled ? [{ el: labelled }] : []);
+
+  return tiers.flatMap(dedupe);
+}
+
+/** Fields the source hit provides a value from — attribute-borne when `attr` is set. */
+function readHit(hit: Located, type: JsonSchemaProperty['type']): unknown {
+  if (hit.attr) return coerce(hit.el.getAttribute(hit.attr) ?? '', type);
+  return readValue(hit.el, type);
 }
 
 function findSource(root: ParentNode, key: string, prop: JsonSchemaProperty): Located | null {
-  const el = allSources(root, key, prop)[0];
-  if (!el) return null;
-  return { el, ref: refFor(el) };
+  const hit = allSourceHits(root, key, prop)[0];
+  if (!hit) return null;
+  return { el: hit.el, ref: refFor(hit.el), attr: hit.attr };
 }
 
 /** Extract one declared property from `scope`, writing into the shared result. */
@@ -299,7 +434,7 @@ function extractProperty(
     return;
   }
 
-  const value = readValue(found.el, prop?.type);
+  const value = readHit(found, prop?.type);
   if (value === undefined) {
     out.missing.push(path);
     return;
@@ -348,33 +483,79 @@ function levelOf(el: Element): number {
 
 interface ItemRootCandidate {
   roots: Element[];
-  coverage: number;
+  /** Declared properties this group can actually supply across its items. */
+  score: number;
+  count: number;
   level: number;
 }
 
+/** How many declared properties a candidate item group can supply across its items. */
+function groupScore(group: Element[], properties: Record<string, JsonSchemaProperty>): number {
+  let score = 0;
+  for (const [key, prop] of Object.entries(properties)) {
+    const supplied = group.some((item) => {
+      const hit = findSource(item, key, prop ?? {});
+      return hit ? readHit(hit, prop?.type) !== undefined : false;
+    });
+    if (supplied) score += 1;
+  }
+  return score;
+}
+
+/** Rank candidates: most properties supplied > most items > shallowest. */
+function betterCandidate(next: ItemRootCandidate, best: ItemRootCandidate | null): boolean {
+  if (!best) return true;
+  if (next.score !== best.score) return next.score > best.score;
+  if (next.count !== best.count) return next.count > best.count;
+  return next.level < best.level;
+}
+
 /**
- * Discover the repeated item roots for an array schema: the deepest set of sibling
- * elements that repeats (>1) and together covers the most declared properties.
+ * Discover the repeated item roots for an array schema. Candidate repeated sibling
+ * groups (>=2 same-tag siblings) are scored by HOW MANY DECLARED PROPERTIES they can
+ * supply across their items; the best score wins, ties go to the group with MORE
+ * items (never to the deepest group — which is what collapsed a 20-row listing into
+ * the inner price/stock pair). An explicit selector, when given, pins the roots.
  */
 function findItemRoots(
   root: ParentNode,
   properties: Record<string, JsonSchemaProperty>,
-): Element[] {
-  const keyByEl = new Map<Element, string[]>();
+  itemSelector?: string,
+): { roots: Element[]; error?: string } {
+  if (itemSelector) {
+    const pinned = Array.from(root.querySelectorAll(itemSelector));
+    if (pinned.length === 0) {
+      return {
+        roots: [],
+        error: `unsupported array schema: explicit item selector "${itemSelector}" matched no item elements`,
+      };
+    }
+    return { roots: pinned };
+  }
+
   const candidates: Element[] = [];
 
   for (const [key, prop] of Object.entries(properties)) {
-    for (const el of allSources(root, key, prop ?? {})) {
-      const keys = keyByEl.get(el) ?? [];
-      if (!keys.includes(key)) keys.push(key);
-      keyByEl.set(el, keys);
-      if (!candidates.includes(el)) candidates.push(el);
+    for (const hit of allSourceHits(root, key, prop ?? {})) {
+      if (!candidates.includes(hit.el)) candidates.push(hit.el);
     }
   }
 
-  if (candidates.length === 0) return [];
+  if (candidates.length === 0) return { roots: [] };
 
+  const groupCache = new Map<Element, Map<string, Element[]>>();
   let best: ItemRootCandidate | null = null;
+
+  const consider = (group: Element[]): void => {
+    if (group.length < 2) return;
+    const candidate: ItemRootCandidate = {
+      roots: group,
+      score: groupScore(group, properties),
+      count: group.length,
+      level: levelOf(group[0]),
+    };
+    if (betterCandidate(candidate, best)) best = candidate;
+  };
 
   for (const candidate of candidates) {
     let node: Element | null = candidate.parentElement;
@@ -382,29 +563,26 @@ function findItemRoots(
       const parent: Element | null = node.parentElement;
       if (!parent) break;
 
-      const group = Array.from(parent.children).filter((c) => c.tagName === node!.tagName);
-      if (group.length > 1) {
-        const covered = new Set<string>();
-        for (const [el, keys] of Array.from(keyByEl.entries())) {
-          if (!group.some((g) => g === el || g.contains(el))) continue;
-          for (const k of keys) covered.add(k);
-        }
-
-        const level = levelOf(node);
-        if (
-          !best ||
-          covered.size > best.coverage ||
-          (covered.size === best.coverage && level > best.level)
-        ) {
-          best = { roots: group, coverage: covered.size, level };
-        }
+      let byTag = groupCache.get(parent);
+      if (!byTag) {
+        byTag = new Map<string, Element[]>();
+        groupCache.set(parent, byTag);
       }
+      let group = byTag.get(node.tagName);
+      if (!group) {
+        group = Array.from(parent.children).filter((c) => c.tagName === node!.tagName);
+        byTag.set(node.tagName, group);
+      }
+      consider(group);
 
       node = parent;
     }
   }
 
-  return best?.roots ?? [];
+  // `best` is written inside the `consider` closure, so TS control flow cannot
+  // narrow it here — read it through an explicit annotation.
+  const picked = best as ItemRootCandidate | null;
+  return { roots: picked?.roots ?? [] };
 }
 
 function emptyResult(error: string, missing: string[] = []): ExtractResult {
@@ -417,7 +595,11 @@ function unsupportedRootError(schemaType: unknown): string {
   return `unsupported schema root type "${shown}": chrome_extract supports {"type":"object"} and {"type":"array","items":{"type":"object"}}`;
 }
 
-export function extractFrom(rootInput: RootInput, schema: JsonSchema): ExtractResult {
+export function extractFrom(
+  rootInput: RootInput,
+  schema: JsonSchema,
+  itemSelector?: string,
+): ExtractResult {
   const root = toRoot(rootInput);
 
   const rawSchema = schema as unknown as { type?: unknown; properties?: unknown; items?: unknown };
@@ -457,8 +639,11 @@ export function extractFrom(rootInput: RootInput, schema: JsonSchema): ExtractRe
       required: items.required,
     };
 
-    const roots = findItemRoots(root, itemSchema.properties);
-    if (roots.length === 0) {
+    const roots = findItemRoots(root, itemSchema.properties, itemSelector);
+    if (roots.error) {
+      return emptyResult(roots.error);
+    }
+    if (roots.roots.length === 0) {
       return emptyResult(
         'unsupported array schema: no repeated item elements matched the declared properties',
       );
@@ -468,7 +653,7 @@ export function extractFrom(rootInput: RootInput, schema: JsonSchema): ExtractRe
     const missing: string[] = [];
     const sourceRefs: Record<string, string> = {};
 
-    data.items = roots.map((itemRoot, index) => {
+    data.items = roots.roots.map((itemRoot, index) => {
       const extracted = extractFields(itemRoot, itemSchema, `items[${index}]`);
       missing.push(...extracted.missing);
       Object.assign(sourceRefs, extracted.sourceRefs);
@@ -504,9 +689,17 @@ export function extractFrom(rootInput: RootInput, schema: JsonSchema): ExtractRe
  * extractFrom, so there is one implementation of the extraction contract.
  *
  * @param schema JSON Schema describing the fields to extract (required)
- * @param selector optional CSS selector scoping extraction to a subtree
+ * @param selector optional CSS selector. For an ARRAY root it is the ITEM root
+ *   selector: every element it matches becomes one item (a caller-visible escape
+ *   hatch when auto-detection picks the wrong repetition). For an object root it
+ *   scopes extraction to the first matching subtree.
  */
 export function inPageExtract(schema: JsonSchema, selector?: string): ExtractResult {
+  const isArrayRoot = (schema as { type?: unknown } | undefined)?.type === 'array';
+  if (selector && isArrayRoot) {
+    return extractFrom(document, schema, selector);
+  }
+
   const root: ParentNode = selector
     ? (document.querySelector(selector) ?? document.body ?? document.documentElement)
     : document;
