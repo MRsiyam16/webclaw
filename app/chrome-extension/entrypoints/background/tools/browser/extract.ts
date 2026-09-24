@@ -13,6 +13,10 @@
  *
  * Ref minting: an element's own `data-ref` is honoured; otherwise a stable `e<n>`
  * counter is minted, skipping any ref already used in the document.
+ *
+ * NOTE: this module must stay free of background-only imports (chrome APIs,
+ * BaseBrowserToolExecutor, ...) because entrypoints/inpage-engine.ts bundles it
+ * into the page-side IIFE. The callable tool surface lives in extract-tool.ts.
  */
 
 export interface JsonSchemaProperty {
@@ -230,6 +234,23 @@ export function extractFrom(rootInput: RootInput, schema: JsonSchema): ExtractRe
   }
 
   return { data, missing, sourceRefs };
+}
+
+/**
+ * In-page entrypoint. The extraction engine needs DOMParser / a live document,
+ * and the background is an MV3 service worker where neither exists — so this
+ * runs inside the page (registered on __MCP_INPAGE__ by entrypoints/
+ * inpage-engine.ts and dispatched by executeInPage). It delegates to
+ * extractFrom, so there is one implementation of the extraction contract.
+ *
+ * @param schema JSON Schema describing the fields to extract (required)
+ * @param selector optional CSS selector scoping extraction to a subtree
+ */
+export function inPageExtract(schema: JsonSchema, selector?: string): ExtractResult {
+  const root: ParentNode = selector
+    ? (document.querySelector(selector) ?? document.body ?? document.documentElement)
+    : document;
+  return extractFrom(root, schema);
 }
 
 export default extractFrom;

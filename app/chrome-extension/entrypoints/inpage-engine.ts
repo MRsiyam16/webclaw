@@ -63,6 +63,7 @@ import {
   inPageEnsureModalFocus,
   inPageDispatchInputEvents,
 } from './background/tools/browser/dom-indexer';
+import { inPageExtract } from './background/tools/browser/extract';
 import { inPageWaitForDOMSettle } from '../utils/action-watchdog';
 import {
   fastSnapshot,
@@ -81,7 +82,7 @@ export default defineUnlistedScript(() => {
   // namespace only when the version string differs, so a stale page-side
   // engine (surviving extension reloads in the same tab) would otherwise keep
   // missing newly registered entrypoints.
-  const ENGINE_VERSION = '2026-09-22.2';
+  const ENGINE_VERSION = '2026-09-24.1';
   const g = globalThis as any;
   if (g.__MCP_INPAGE__ && g.__MCP_INPAGE_VERSION__ === ENGINE_VERSION) {
     return;
@@ -139,6 +140,7 @@ export default defineUnlistedScript(() => {
     inPageScrollUntilFound,
     inPageEnsureModalFocus,
     inPageDispatchInputEvents,
+    inPageExtract,
     inPageFastSnapshot: fastSnapshot,
     snapshot: fastSnapshot,
     inPageCheckOcclusion,

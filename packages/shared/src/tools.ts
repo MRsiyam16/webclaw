@@ -178,6 +178,7 @@ export const TOOL_NAMES = {
     INTERCEPT_API: 'chrome_intercept_api',
     CDP_EXECUTE: 'chrome_cdp_execute',
     GREP: 'chrome_grep',
+    EXTRACT: 'chrome_extract',
     FORM_PIPELINE: 'chrome_form_pipeline',
     INSERT_MEDIA: 'chrome_insert_media',
     DISMISS_OVERLAY: 'chrome_dismiss_overlay',
@@ -3063,6 +3064,39 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         },
       },
       required: ['query'],
+    },
+  },
+  {
+    name: TOOL_NAMES.BROWSER.EXTRACT,
+    annotations: {
+      title: 'Schema-Typed Extract',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    description:
+      'Schema-typed extraction: pull the fields a JSON Schema declares out of the page (or an HTML string), with source attribution. Each key resolves via [data-field="key"] -> #key -> [name="key"] -> class match -> optional per-property selector -> label text; form controls read value, other elements read textContent, and declared number/integer/boolean types are coerced. Returns { data, missing, sourceRefs } — a key with no source element is reported in `missing` and is never invented into `data`.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        schema: {
+          type: 'object',
+          description:
+            'JSON Schema object describing the fields to extract: { type: "object", properties: { <key>: { type: "string"|"number"|"integer"|"boolean", description?, selector? } }, required?: string[] }',
+        },
+        selector: {
+          type: 'string',
+          description:
+            'CSS selector scoping extraction to a subtree (optional; defaults to the whole document)',
+        },
+        tabId: { type: 'number', description: 'Target tab ID (optional)' },
+        sessionId: {
+          type: 'string',
+          description: 'Session identifier for tab affinity (optional)',
+        },
+      },
+      required: ['schema'],
     },
   },
   {

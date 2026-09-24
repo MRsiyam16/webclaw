@@ -98,6 +98,7 @@ export const TOOL_CATEGORIES: Record<string, string> = {
     'chrome_get_markdown',
     'chrome_inspect_media',
     'chrome_grep',
+    'chrome_extract',
     'chrome_get_dropdown_options',
     'chrome_tool_docs',
   ].join(' '),

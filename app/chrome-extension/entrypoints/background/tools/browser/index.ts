@@ -48,5 +48,6 @@ export { doctorTool } from './doctor';
 export { formPipelineTool } from './form-pipeline';
 export { insertMediaTool } from './insert-media';
 export { extractFrom } from './extract';
+export { extractTool } from './extract-tool';
 export { dismissOverlayTool } from './dismiss-overlay';
 export { scrollUntilFoundTool } from './scroll-until-found';
