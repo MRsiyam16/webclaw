@@ -144,3 +144,72 @@ describe('get_markdown hard output budget', () => {
     expect(schema.inputSchema.properties.maxLength.type).toBe('number');
   });
 });
+
+describe('budgetText hard invariant: text.length <= maxChars for every maxChars >= 0', () => {
+  const SOURCE = 'abcdefghij'; // length 10
+  const EMOJI = '😀'.repeat(5); // 5 astral chars, 10 code units
+
+  const expectBounded = (
+    out: ReturnType<typeof budgetText>,
+    maxChars: number,
+    original: string,
+  ) => {
+    expect(out.text.length).toBeLessThanOrEqual(maxChars);
+    expect(out.totalChars).toBe(original.length);
+  };
+
+  it('maxChars 0 yields an empty text (never the full original)', () => {
+    const out = budgetText(SOURCE, 0);
+    expectBounded(out, 0, SOURCE);
+    expect(out.text).toBe('');
+    expect(out.truncated).toBe(true);
+  });
+
+  it('text length exactly == maxChars passes through untruncated', () => {
+    const out = budgetText(SOURCE, SOURCE.length);
+    expectBounded(out, SOURCE.length, SOURCE);
+    expect(out.text).toBe(SOURCE);
+    expect(out.truncated).toBe(false);
+    expect(out.totalChars).toBe(10);
+  });
+
+  it('length == maxChars + 1 truncates within the cap', () => {
+    const out = budgetText(SOURCE, SOURCE.length + 1);
+    expectBounded(out, SOURCE.length + 1, SOURCE);
+    expect(out.text).toBe(SOURCE);
+    expect(out.truncated).toBe(false);
+  });
+
+  it('a maxChars smaller than the notice drops the notice instead of exceeding the cap', () => {
+    const out = budgetText(SOURCE, 9);
+    expectBounded(out, 9, SOURCE);
+    expect(out.truncated).toBe(true);
+    expect(out.text).not.toContain('[truncated');
+  });
+
+  it('cuts an emoji string on a boundary without splitting a surrogate pair', () => {
+    for (const max of [0, 1, 2, 3, 4, 8, 9, 11]) {
+      const out = budgetText(EMOJI, max);
+      expectBounded(out, max, EMOJI);
+      expect(out.text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+      expect(out.text).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+    }
+  });
+
+  it('leaves a text shorter than maxChars untouched', () => {
+    const out = budgetText('short', 1000);
+    expectBounded(out, 1000, 'short');
+    expect(out.text).toBe('short');
+    expect(out.truncated).toBe(false);
+  });
+
+  it('keeps the large-text case bounded and non-finite caps untruncated', () => {
+    const big = budgetText('x'.repeat(200_000), 1000);
+    expect(big.text.length).toBeLessThanOrEqual(1000);
+    expect(big.totalChars).toBe(200_000);
+    expect(big.truncated).toBe(true);
+
+    const unbounded = budgetText(SOURCE, Number.NaN);
+    expect(unbounded).toMatchObject({ text: SOURCE, truncated: false, totalChars: 10 });
+  });
+});

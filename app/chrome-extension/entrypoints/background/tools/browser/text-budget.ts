@@ -28,9 +28,27 @@ export interface TextBudgetResult {
 }
 
 /**
+ * Slice `source` to at most `keep` code units WITHOUT splitting a surrogate
+ * pair: if the cut would land between a high and a low surrogate, back off one
+ * unit so an astral character (emoji) is either kept whole or dropped whole.
+ */
+function safeCut(source: string, keep: number): string {
+  if (keep <= 0) return '';
+  let end = Math.min(keep, source.length);
+  const last = source.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return source.slice(0, end);
+}
+
+/**
  * Clamp `text` to `maxChars` characters, reporting the true original length.
- * Truncation happens on a character boundary: the cut is a plain code-unit
- * slice, which is what every upstream consumer already assumes.
+ *
+ * Hard invariant: `text.length <= maxChars` for every `maxChars >= 0`, with no
+ * exception for tiny budgets — when the truncation notice cannot fit inside the
+ * cap we drop the notice rather than exceed it. Truncation is still signalled
+ * by `truncated: true` and the TRUE `totalChars`, so the caller can always tell
+ * that (and how much) content was dropped. The cut never splits a surrogate
+ * pair.
  */
 export function budgetText(
   text: string,
@@ -39,14 +57,23 @@ export function budgetText(
   const source = typeof text === 'string' ? text : '';
   const totalChars = source.length;
 
-  if (!Number.isFinite(maxChars) || maxChars <= 0 || totalChars <= maxChars) {
+  // Non-finite caps mean "no budget" — pass the source through untouched.
+  if (!Number.isFinite(maxChars)) {
     return { text: source, truncated: false, totalChars };
   }
 
-  const notice = `\n…[truncated: showing ${maxChars} of ${totalChars} chars]`;
-  // Fold the notice into the budget so the returned text stays within maxChars.
-  const keep = Math.max(0, maxChars - notice.length);
-  const text2 = source.slice(0, keep) + notice;
+  const cap = Math.max(0, Math.floor(maxChars));
+  if (totalChars <= cap) {
+    return { text: source, truncated: false, totalChars };
+  }
 
-  return { text: text2, truncated: true, totalChars };
+  const notice = `\n…[truncated: showing ${cap} of ${totalChars} chars]`;
+  if (notice.length <= cap) {
+    // Fold the notice into the budget so the returned text stays within maxChars.
+    return { text: safeCut(source, cap - notice.length) + notice, truncated: true, totalChars };
+  }
+
+  // Budget too small for the notice: drop it rather than exceed the cap. The
+  // caller still learns about the truncation from `truncated`/`totalChars`.
+  return { text: safeCut(source, cap), truncated: true, totalChars };
 }
