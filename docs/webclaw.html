@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>webclaw — the browser tool that verifies itself</title>
+<style>
+  :root{
+    --canvas:#131010;
+    --surface-soft:#1b1818;
+    --surface-card:#1f1c1c;
+    --surface-dark:#0a0a0b;
+    --surface-dark-elevated:#1b1818;
+    --ink:#f2eded;
+    --ink-deep:#ffffff;
+    --body:#c9c4c4;
+    --charcoal:#a7a2a2;
+    --mute:#8a8585;
+    --stone:#6e6a6a;
+    --ash:#4a4646;
+    --accent:#f9008d;
+    --accent-hover:#d1006f;
+    --hairline:rgba(255,255,255,0.08);
+    --hairline-strong:rgba(255,255,255,0.15);
+    --ok:#4ade80;
+    --warn:#e4c48a;
+    --bad:#ff5b5b;
+    --mono:ui-monospace,'JetBrains Mono','IBM Plex Mono',Menlo,Consolas,'Courier New',monospace;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--canvas);
+    color:var(--body);
+    font-family:var(--mono);
+    font-size:16px;
+    font-weight:400;
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+    text-rendering:optimizeLegibility;
+  }
+  @media (prefers-reduced-motion: reduce){
+    *{animation:none !important;transition:none !important;scroll-behavior:auto !important;}
+  }
+  a{color:inherit;text-decoration:none;}
+  .wrap{max-width:1280px;margin:0 auto;padding:0 24px;}
+  .rule{border:0;border-top:1px solid var(--hairline);margin:0;}
+  .sec{padding:88px 0;}
+  .sec-tight{padding:56px 0;}
+
+  /* ---------- type roles ---------- */
+  .hero-h1{font-size:40px;font-weight:700;line-height:1.4;color:var(--ink-deep);margin:0 0 20px;}
+  .sec-h2{font-size:20px;font-weight:700;line-height:1.5;color:var(--ink);margin:0 0 16px;}
+  .body{font-size:16px;font-weight:400;line-height:1.6;color:var(--body);}
+  .body-strong{font-size:16px;font-weight:500;line-height:1.5;color:var(--ink);}
+  .label{font-size:14px;font-weight:700;line-height:1.4;letter-spacing:.02em;}
+  .caption{font-size:13px;font-weight:400;line-height:1.6;color:var(--mute);}
+
+  /* ---------- nav ---------- */
+  header.nav{border-bottom:1px solid var(--hairline);background:var(--canvas);}
+  .nav-inner{display:flex;flex-wrap:wrap;align-items:center;gap:16px;padding:16px 0;}
+  .wordmark{font-size:9px;line-height:1.05;letter-spacing:0;color:var(--ink);margin:0;}
+  .brand{display:flex;align-items:flex-end;gap:12px;}
+  .active-badge{
+    background:transparent;border:1px solid var(--accent);color:var(--accent);
+    font-size:14px;font-weight:700;line-height:1.4;letter-spacing:.02em;
+    padding:2px 10px;border-radius:4px;
+  }
+  .nav-spacer{flex:1 1 auto;}
+  .nav-links{display:flex;flex-wrap:wrap;align-items:center;gap:10px;}
+  .pill{
+    display:inline-block;background:var(--accent);color:var(--ink-deep);
+    font-size:14px;font-weight:700;line-height:1.4;letter-spacing:.02em;
+    padding:5px 12px;border-radius:4px;
+  }
+  .pill:hover{background:var(--accent-hover);}
+  .btn-primary{
+    display:inline-block;background:var(--ink);color:var(--canvas);
+    font-size:14px;font-weight:700;line-height:1.4;letter-spacing:.02em;
+    padding:9px 22px;border-radius:4px;
+  }
+  .btn-primary:hover{background:var(--ink-deep);}
+  .btn-secondary{
+    display:inline-block;background:transparent;border:1px solid var(--hairline-strong);color:var(--ink);
+    font-size:14px;font-weight:700;line-height:1.4;letter-spacing:.02em;
+    padding:9px 22px;border-radius:4px;
+  }
+  .btn-secondary:hover{border-color:var(--accent);color:var(--ink-deep);}
+
+  /* ---------- hero ---------- */
+  .hero{padding:72px 0 0;}
+  .hero-sub{max-width:820px;margin-bottom:16px;}
+  .meta-row{display:flex;flex-wrap:wrap;gap:10px;margin:24px 0 0;}
+  .tag{
+    display:inline-block;border:1px solid var(--hairline-strong);color:var(--charcoal);
+    font-size:14px;font-weight:700;line-height:1.4;letter-spacing:.02em;
+    padding:4px 10px;border-radius:4px;
+  }
+  .tag-accent{border-color:var(--accent);color:var(--accent);}
+
+  /* ---------- terminal mockup ---------- */
+  .mockup-band{background:var(--surface-dark);border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline);padding:32px 0 40px;}
+  .mockup-bar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:16px;}
+  .mockup-title{font-size:14px;font-weight:700;line-height:1.4;letter-spacing:.02em;color:var(--charcoal);}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:4px;background:var(--accent);}
+  .tui{
+    background:var(--surface-dark-elevated);
+    border:1px solid var(--hairline);
+    padding:18px 18px 20px;
+    font-size:13px;line-height:1.6;
+    color:var(--ink);
+    overflow-x:auto;
+  }
+  .tui-prompt-row{
+    background:var(--surface-soft);border-radius:4px;padding:6px 12px;
+    color:var(--ink-deep);font-size:13px;line-height:1.6;margin:14px 0 10px;
+    display:inline-block;max-width:100%;
+  }
+  .tui-prompt-row:first-child{margin-top:0;}
+  .tl{white-space:pre-wrap;word-break:break-word;color:var(--ink);}
+  .tl-dim{color:var(--mute);}
+  .tl-ok{color:var(--ok);}
+  .tl-bad{color:var(--bad);}
+  .tl-warn{color:var(--warn);}
+  .tl-hl{color:var(--accent);}
+
+  /* ---------- feature grid ---------- */
+  .feat-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--hairline);border:1px solid var(--hairline);}
+  .feat{background:var(--canvas);padding:28px 26px;}
+  .feat h3{margin:0 0 10px;}
+  .feat p{margin:0 0 14px;}
+  .num{color:var(--accent);font-weight:700;letter-spacing:.02em;font-size:14px;display:block;margin-bottom:8px;}
+
+  /* ---------- code ---------- */
+  pre.code{
+    background:var(--surface-soft);border-radius:4px;padding:14px 18px;margin:0;
+    font-family:var(--mono);font-size:13px;line-height:1.6;color:var(--body);
+    overflow-x:auto;white-space:pre-wrap;word-break:break-word;
+  }
+  .hl{color:var(--accent);}
+  code.inline{
+    background:var(--surface-soft);border-radius:4px;padding:1px 6px;
+    font-family:var(--mono);font-size:13px;color:var(--ink);
+  }
+
+  /* ---------- checklist ---------- */
+  ul.check{list-style:none;margin:0;padding:0;}
+  ul.check li{margin:0 0 12px;font-size:16px;line-height:1.6;color:var(--body);}
+  ul.check li .g{color:var(--accent);font-weight:700;margin-right:8px;}
+  ul.check li b{color:var(--ink);font-weight:700;}
+
+  /* ---------- tables ---------- */
+  .table-scroll{overflow-x:auto;border:1px solid var(--hairline);}
+  table{border-collapse:collapse;width:100%;min-width:720px;font-size:13px;line-height:1.6;}
+  th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--hairline);vertical-align:top;}
+  thead th{background:var(--surface-soft);color:var(--ink);font-weight:700;letter-spacing:.02em;font-size:14px;}
+  tbody tr:last-child td{border-bottom:0;}
+  td.k{color:var(--ink);font-weight:700;}
+  td.win{color:var(--accent);font-weight:700;}
+  td.even{color:var(--charcoal);}
+  .tbl-cap{margin:14px 0 0;}
+
+  /* ---------- limits ---------- */
+  .limits{color:var(--mute);}
+  .limits li{margin:0 0 10px;}
+  .limits ul{margin:0;padding-left:0;list-style:none;}
+  .limits ul li::before{content:"— ";color:var(--ash);}
+
+  /* ---------- footer ---------- */
+  footer{border-top:1px solid var(--hairline);padding:40px 0 64px;}
+  .foot-links{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px;}
+  .foot-links a{
+    border:1px solid var(--hairline-strong);border-radius:4px;padding:5px 12px;
+    font-size:14px;font-weight:700;line-height:1.4;letter-spacing:.02em;color:var(--ink);
+  }
+  .foot-links a:hover{border-color:var(--accent);color:var(--accent);}
+  .fine{font-size:13px;line-height:1.6;color:var(--stone);}
+  .fine a{color:var(--stone);text-decoration:underline;}
+
+  @media (max-width:860px){
+    .feat-grid{grid-template-columns:1fr;}
+    .hero-h1{font-size:32px;}
+    .sec{padding:64px 0;}
+  }
+  @media (max-width:520px){
+    .hero-h1{font-size:26px;}
+    .nav-inner{gap:12px;}
+  }
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <div class="brand">
+      <pre class="wordmark" aria-label="webclaw">█   █ █████ ████   ████ █     ███  █   █
+█   █ █     █   █ █     █     █   █ █   █
+█ █ █ ████  ████  █     █     █████ █ █ █
+██ ██ █     █   █ █     █     █   █ ██ ██
+█   █ █████ ████   ████ █████ █   █ █   █</pre>
+      <span class="active-badge">ACTIVE</span>
+    </div>
+    <div class="nav-spacer"></div>
+    <nav class="nav-links" aria-label="Primary">
+      <a class="pill" href="https://github.com/MRsiyam16/webclaw">GitHub ↗</a>
+      <a class="pill" href="#benchmark">Benchmark</a>
+      <a class="pill" href="#features">Features</a>
+      <a class="pill" href="#live-tests">Live Tests</a>
+      <a class="pill" href="#install">Install</a>
+      <a class="btn-primary" href="https://github.com/MRsiyam16/webclaw">View the repo</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+  <!-- 2. HERO -->
+  <section class="hero">
+    <div class="wrap">
+      <h1 class="hero-h1">The browser tool that tells you whether it actually worked.</h1>
+      <p class="body hero-sub">This is a fork of BrowserClaw with an evidence envelope, persistent element refs, and schema-typed extraction merged in. It drives your real, logged-in Chrome — your cookies, your session — and every mutating action comes back with a verdict and the evidence behind it, instead of a silent success.</p>
+      <div class="meta-row">
+        <span class="tag tag-accent">19 commits</span>
+        <span class="tag">76 test files / 657 tests passing</span>
+        <span class="tag">vue-tsc clean</span>
+        <span class="tag">runs live in a real Chrome</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- signature visual -->
+  <div class="mockup-band">
+    <div class="wrap">
+      <div class="mockup-bar">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="mockup-title">webclaw.session — real tool output, pasted verbatim</span>
+      </div>
+      <div class="tui" role="figure" aria-label="Example webclaw session output">
+        <div class="tui-prompt-row">» webclaw.read_dom({ tabId: 8842, deltaOnly: true })</div>
+        <div class="tl tl-ok">✓ {"success":true,"unchanged":true,"revision":5,"totalElements":52,</div>
+        <div class="tl tl-ok">    "message":"Page DOM unchanged since last snapshot. No new or modified interactive elements."}</div>
+        <div class="tl tl-dim">  first full read 18,698 chars → unchanged re-read 227 chars (~80x smaller)</div>
+
+        <div class="tui-prompt-row">» webclaw.fill_index({ index: 4, text: "Neo4j", pressEnter: true })</div>
+        <div class="tl tl-ok">✓ verdict: applied   urlChanged: true</div>
+        <div class="tl">  postConditions: [{ "condition":"value_equals", "expected":"Neo4j", "actual":"Neo4j",</div>
+        <div class="tl">                     "passed":true, "evidence":{ "navigated":true, "preNavReadBack":"Neo4j",</div>
+        <div class="tl">                     "source":"pre_navigation_commitment_read" }}]</div>
+
+        <div class="tui-prompt-row">» webclaw.fill_index({ index: 4, text: "Neo4j", expect: "Cypher", pressEnter: true })</div>
+        <div class="tl tl-bad">✗ verdict: failed — value_equals failed: expected "Cypher", got "Neo4j"</div>
+
+        <div class="tui-prompt-row">» webclaw.extract({ schema: ["title","price","availability"], sourceRefs: true })</div>
+        <div class="tl tl-ok">✓ 20 rows in one call   missing: []</div>
+        <div class="tl">  first: {"availability":"In stock","price":12.84,"title":"In Her Wake"}</div>
+        <div class="tl">  last:  {"price":33.63,"title":"You can't bury them all: Poems"}</div>
+
+        <div class="tui-prompt-row">» webclaw.interact_index({ index: 3 })</div>
+        <div class="tl tl-warn">! verdict: stale_ref   0.03s   recovery.freshRefs: populated</div>
+        <div class="tl tl-dim">  no legacy "ACTION REQUIRED" prose anywhere in the response</div>
+
+        <div class="tui-prompt-row">» webclaw.extract({ schema: ["isbn"] })   // property that is not on the page</div>
+        <div class="tl tl-ok">✓ {"data":{},"missing":["isbn"],"sourceRefs":{}}   // never invented</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. WHAT WE BUILT -->
+  <section class="sec" id="features">
+    <div class="wrap">
+      <h2 class="sec-h2">What we built</h2>
+      <p class="body" style="max-width:820px;margin-bottom:32px;">Six changes layered on top of the fork, each one aimed at the same failure mode: a tool that reports success while the page quietly did nothing.</p>
+
+      <div class="feat-grid">
+
+        <div class="feat">
+          <span class="num">01</span>
+          <h3 class="sec-h2">Evidence envelope</h3>
+          <p class="body">Every mutating action returns a verdict — <code class="inline">applied</code>, <code class="inline">applied_unverified</code>, <code class="inline">noop</code>, <code class="inline">failed</code>, or <code class="inline">stale_ref</code> — together with an <code class="inline">outcome</code>, the <code class="inline">evidence</code> behind it, and the <code class="inline">postConditions</code> that were checked. A click no longer returns a bare true; it returns what the page looked like after.</p>
+          <pre class="code">{ "verdict": "<span class="hl">applied</span>", "outcome": "…", "evidence": { … }, "postConditions": [ … ] }</pre>
+        </div>
+
+        <div class="feat">
+          <span class="num">02</span>
+          <h3 class="sec-h2">Post-conditions with expected / actual / evidence</h3>
+          <p class="body">Assertions are declared up front and each one reports <code class="inline">expected</code>, <code class="inline">actual</code>, and the <code class="inline">evidence</code> that produced them. Two false negatives found in live testing are fixed: assertions are now evaluated against the <b>PRE-navigation</b> read-back, and pollable assertions settle-poll for up to <b>600ms / 4 attempts</b> before being reported as failures.</p>
+          <pre class="code">{ "condition":"value_equals", "expected":"Cypher", "actual":"Neo4j", "passed":false }</pre>
+        </div>
+
+        <div class="feat">
+          <span class="num">03</span>
+          <h3 class="sec-h2">Persistent refs</h3>
+          <p class="body">Element ids like <code class="inline">e1</code> / <code class="inline">e2</code> stay valid across re-renders, held in a <code class="inline">WeakRef</code> map and self-healed by fingerprint. Acting on a ref that has died returns a structured <code class="inline">stale_ref</code> with usable <code class="inline">freshRefs</code> instead of hanging or acting on the wrong node.</p>
+          <pre class="code">{ "verdict":"<span class="hl">stale_ref</span>", "recovery":{ "freshRefs":[ … ] } }   // 0.03s</pre>
+        </div>
+
+        <div class="feat">
+          <span class="num">04</span>
+          <h3 class="sec-h2">Schema-typed extraction</h3>
+          <p class="body"><code class="inline">browser_extract</code> returns <code class="inline">{data, missing, sourceRefs}</code>. It pulled 40 typed rows from a real catalogue in one call. Values it cannot find go into <code class="inline">missing</code> — they are never invented — and every value in <code class="inline">data</code> points back at the element it was read from.</p>
+          <pre class="code">{ "data":{ "price":12.84, "title":"In Her Wake" }, "missing":[], "sourceRefs":{ … } }</pre>
+        </div>
+
+        <div class="feat">
+          <span class="num">05</span>
+          <h3 class="sec-h2">Token discipline</h3>
+          <p class="body">Hard output budgets (default <b>120,000</b> chars, with an honest truncation marker when the cap is hit), delta-only re-reads on by default, and SimHash folding of near-duplicate list rows. The point is that a big page costs a small read.</p>
+          <pre class="code">get_markdown(maxLength: 500) → exactly 500 chars + truncation marker
+<span class="hl">before the fix</span>: 40,828 chars returned, cap ignored</pre>
+        </div>
+
+        <div class="feat">
+          <span class="num">06</span>
+          <h3 class="sec-h2">Perception for non-DOM surfaces + escape hatches</h3>
+          <p class="body">Set-of-Mark screenshots share one numbering between the image and the text map, safe-click-point resolution goes through <code class="inline">elementFromPoint</code>, and a zoom crop mode lets you look closer at a single label. When the DOM is the wrong tool, tier-3 <code class="inline">javascript()</code> and <code class="inline">cdp_execute()</code> are unlocked per session.</p>
+          <pre class="code">elementMap → 151 labelled entries
+  [1] a – Jump to content   [4] input – Search Wikipedia
+zoom(8) → { "n":8, "x":632, "y":266, "width":581, "height":53, "scale":2 }</pre>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- 4. HOW IT DRIVES CHROME -->
+  <section class="sec">
+    <div class="wrap">
+      <h2 class="sec-h2">How it drives Chrome (and the Claude parallel)</h2>
+      <p class="body" style="max-width:900px;">webclaw lives in a Chrome MV3 extension and reaches the page through <b>Chrome's own debugger protocol</b> — <code class="inline">chrome.debugger</code> / CDP. This is the same trusted-input mechanism that Claude's Chrome control relies on for browser control; it is Chrome's own protocol for browser control, not a simulation layered on top of the page.</p>
+      <p class="body" style="max-width:900px;">The practical consequence: clicks and typing are trusted (<code class="inline">isTrusted: true</code>) and survive frameworks that quietly ignore an <code class="inline">element.click()</code> — libraries that inject synthetic events into the page do not clear that bar. It also runs inside your real, logged-in Chrome, so it acts with your cookies and your session rather than a separate blank automation profile, and it uses focus emulation so it can work in a background tab without stealing focus. A native-messaging bridge exposes the same tools over local HTTP and MCP.</p>
+      <p class="caption" style="max-width:900px;">webclaw is not Claude, is not affiliated with Anthropic, and is built independently. The only thing stated here about Anthropic's side is the mechanism: Chrome's debugger protocol for browser control.</p>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- 5. HOW IT COMPARES -->
+  <section class="sec" id="benchmark">
+    <div class="wrap">
+      <h2 class="sec-h2">How it compares</h2>
+      <p class="body" style="max-width:900px;margin-bottom:28px;">Where we have measurements we print them; where we only have a qualitative difference we say so plainly. The table below is deliberately qualitative except in the rows the benchmark actually covers.</p>
+
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>capability</th>
+              <th>webclaw</th>
+              <th>browser_exec / browser-use</th>
+              <th>Playwright-MCP</th>
+              <th>Stagehand</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="k">Verifies the resulting STATE and returns expected-vs-actual evidence</td>
+              <td class="win">yes — verdict + postConditions + evidence</td>
+              <td class="even">no</td>
+              <td class="even">no</td>
+              <td class="even">partial (action success, not state)</td>
+            </tr>
+            <tr>
+              <td class="k">Stable element refs with structured stale-ref recovery</td>
+              <td class="win">yes — e-ids, WeakRef + fingerprint, stale_ref + freshRefs</td>
+              <td class="even">refs, no structured recovery</td>
+              <td class="even">locators, no recovery envelope</td>
+              <td class="even">locators/natural-language, no recovery envelope</td>
+            </tr>
+            <tr>
+              <td class="k">Schema-typed extraction with per-value provenance</td>
+              <td class="win">yes — {data, missing, sourceRefs}</td>
+              <td class="even">no</td>
+              <td class="even">no</td>
+              <td class="even">typed extract, no per-value provenance</td>
+            </tr>
+            <tr>
+              <td class="k">Token discipline (budgets, delta-by-default, list folding)</td>
+              <td class="win">yes — 120k cap, delta re-reads, SimHash folding</td>
+              <td class="even">no budget/delta by default</td>
+              <td class="even">no budget/delta by default</td>
+              <td class="even">no budget/delta by default</td>
+            </tr>
+            <tr>
+              <td class="k">Runs in YOUR logged-in Chrome vs a separate automation profile</td>
+              <td class="win">your real Chrome, your cookies</td>
+              <td class="even">separate automation profile</td>
+              <td class="even">separate automation profile</td>
+              <td class="even">separate automation profile</td>
+            </tr>
+            <tr>
+              <td class="k">Trusted input via Chrome's debugger protocol (isTrusted)</td>
+              <td class="win">yes — CDP trusted input</td>
+              <td class="even">synthetic DOM events</td>
+              <td class="even">synthetic DOM events</td>
+              <td class="even">synthetic DOM events</td>
+            </tr>
+            <tr>
+              <td class="k">Raw js() / cdp() escape hatch</td>
+              <td class="win">yes — gated per session</td>
+              <td class="even">yes</td>
+              <td class="even">no</td>
+              <td class="even">no</td>
+            </tr>
+            <tr>
+              <td class="k">Setup cost</td>
+              <td class="win">install the extension in your own Chrome; nothing else</td>
+              <td class="even">external browser driver/runtime</td>
+              <td class="even">external browser driver/runtime</td>
+              <td class="even">framework + API key</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="caption tbl-cap">Qualitative rows are exactly that — qualitative. We did not run head-to-head harnesses against Playwright-MCP or Stagehand, so those columns read from what each tool exposes, not from measured runs.</p>
+
+      <h2 class="sec-h2" style="margin-top:64px;">Measured benchmark</h2>
+      <p class="body" style="max-width:900px;margin-bottom:20px;">4 tasks × 2 arms, one fresh session per cell. Numbers come from the local session database, not from self-reporting. Correctness was <b>4/4 for both arms</b> — the difference here is cost, not whether the task got done.</p>
+
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>task</th>
+              <th>webclaw</th>
+              <th>browser_exec</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="k">40-row typed extraction</td>
+              <td class="win">9 calls · 16.4s · 36,730 in</td>
+              <td class="even">19 calls · 111.2s · 46,751 in</td>
+            </tr>
+            <tr>
+              <td class="k">Wikipedia search-box → article</td>
+              <td class="win">13 calls · ~60s · 65,007 in</td>
+              <td class="even">14 calls · 35.2s · 55,477 in</td>
+            </tr>
+            <tr>
+              <td class="k">Multi-step click-through → downloads page</td>
+              <td class="win">14 calls · 31.3s · 38,435 in</td>
+              <td class="even">8 calls · 31s · 34,982 in</td>
+            </tr>
+            <tr>
+              <td class="k">Form behind a modal overlay + cookie banner</td>
+              <td class="win">26 calls · 18.7s · 146,649 in</td>
+              <td class="even">48 calls · 378s* · 102,801 in</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="caption tbl-cap">Honest captions, because they change how you read the table: this is a <b>4-task sample</b>. The call-count column is the trustworthy one — the instructions given to the two arms were <b>not identical in length</b>, which confounds token totals. And the overlay task's wall time is <b>not comparable</b>: the exec arm's 378s is mostly it correctly refusing loopback URLs, its actual drive was about 3s (*). Outcome quality on all four: 4/4 both arms.</p>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- 6. PROOF FROM LIVE TESTING -->
+  <section class="sec" id="live-tests">
+    <div class="wrap">
+      <h2 class="sec-h2">Proof from live testing</h2>
+      <p class="body" style="max-width:900px;margin-bottom:24px;">This was verified in a real Chrome, not only in unit tests. Six defects slipped past the test suite and were caught <b>only</b> by driving a live page; all six are now fixed. This list is the actual credibility behind the word "verified."</p>
+      <ul class="check">
+        <li><span class="g">✓</span><b>Degenerate provenance refs</b> — sourceRefs collapsed to the same node; fixed.</li>
+        <li><span class="g">✓</span><b>No array extraction</b> — a list of items came back as nothing; fixed (20 rows from page 2 of the catalogue, where the same call had returned only 2 rows one page earlier).</li>
+        <li><span class="g">✓</span><b>Silently ignored zoom param</b> — zoom was accepted and discarded; fixed (now returns a real crop box + scale).</li>
+        <li><span class="g">✓</span><b>Legacy prose leaking beside the stale_ref verdict</b> — an old "ACTION REQUIRED" string shipped alongside the new structured response; removed.</li>
+        <li><span class="g">✓</span><b>Folding unproven</b> — near-duplicate folding was assumed to work and hadn't been exercised; proven live.</li>
+        <li><span class="g">✓</span><b>Item-root collapse + attribute matching</b> — extraction lost the per-item root and mis-matched attributes; fixed.</li>
+      </ul>
+      <div class="meta-row">
+        <span class="tag">76 test files / 657 tests passing</span>
+        <span class="tag">vue-tsc clean</span>
+        <span class="tag tag-accent">extension bundle rebuilt + running live in a real Chrome</span>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- 7. HONEST LIMITS -->
+  <section class="sec-tight">
+    <div class="wrap limits">
+      <h2 class="sec-h2" style="color:var(--charcoal);">Honest limits</h2>
+      <ul>
+        <li>4 of 7 benchmark tasks re-run; T1 / T4 / T5 were skipped.</li>
+        <li>The settle-poll never actually fired for a genuinely &gt;0ms-late update in the fixture.</li>
+        <li>The legacy active-tab fallback branch is unexercised.</li>
+        <li>Benchmark prompts were not byte-identical in length between arms.</li>
+        <li>The licence is AGPL-3.0 upstream, MIT under <code class="inline">app/chrome-extension</code>.</li>
+      </ul>
+    </div>
+  </section>
+
+</main>
+
+<hr class="rule">
+
+<!-- 8. FOOTER -->
+<footer id="install">
+  <div class="wrap">
+    <div class="foot-links">
+      <a href="https://github.com/MRsiyam16/webclaw">Repo ↗</a>
+      <a href="#features">Features</a>
+      <a href="#benchmark">Benchmark</a>
+      <a href="#live-tests">Live Tests</a>
+      <a href="#install">Install</a>
+    </div>
+    <p class="fine">webclaw — a fork of BrowserClaw. The upstream project (<a href="https://github.com/MRsiyam16/webclaw">GoldenLoaf24h/browserclaw</a>) is preserved as the <b>upstream</b> remote. This page is a static document: no scripts, no external assets, no tracking.</p>
+    <p class="fine">Repository: <a href="https://github.com/MRsiyam16/webclaw">https://github.com/MRsiyam16/webclaw</a> · Licensed AGPL-3.0 upstream (MIT under app/chrome-extension).</p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -37,6 +37,59 @@ Two execution paths are available:
 
 ---
 
+## 🧩 What this fork adds
+
+This working copy is a fork of BrowserClaw, published at <https://github.com/MRsiyam16/webclaw>. The original project is preserved as the `upstream` git remote (`GoldenLoaf24h/browserclaw`) so future upstream fixes can still be pulled. The licence is unchanged: AGPL-3.0 at the repo root, MIT under `app/chrome-extension`.
+
+Upstream is honest about _what it did_; this fork is built to be honest about _what actually happened_. Its merged-tool work makes every mutating action report its real outcome and shrinks what an agent has to read to find out.
+
+- **Evidence envelope + verdicts.** Every mutating tool returns an `outcome` line, structured `evidence`, and `postConditions` (see `result-envelope.ts`). The `verdict` is one of `applied`, `applied_unverified`, `noop`, `failed`, `stale_ref`.
+- **Post-conditions.** A tool declares what should be true after the action; each condition carries its expected value, the actual value, and evidence. Before it may report failure it runs a bounded settle-poll — 4 reads over 3 waits of 200 ms, capped at 600 ms — and stops early the moment the condition holds. Value assertions are evaluated against the PRE-navigation read-back, so an action whose effect is a URL change is checked against the value it committed, not the page it landed on.
+- **Persistent element refs.** Beyond the positional `index`, elements carry a stable `ref` (`e1`, `e2`, …) backed by a `WeakRef` map with fingerprint self-healing. A dead ref returns `stale_ref` plus `recovery.freshRefs` — the page's current index — instead of a silent click on the wrong node.
+- **Schema-typed extraction.** `browser_extract` reads declared fields from the page and returns `{data, missing, sourceRefs}`: absent values go in `missing` and are never invented. Arrays are supported, each value carries per-value provenance, and an unsupported schema shape returns a structured `error` rather than an empty result.
+- **Token discipline.** Every response passes through an output budget (`budgetText`, default 120,000 chars) that truncates with an honest marker instead of silently. `read_dom` is delta-only by default (`deltaOnly: false` returns the full tree); an unchanged re-read measured 18,698 chars → 227. In compact format, consecutive near-duplicate list rows fold into a one-line SimHash marker that still enumerates every folded ref.
+- **Set-of-Mark screenshots.** `browser_screenshot` can annotate interactive elements with numbered badges on one shared numbering scheme and returns an `elementMap` alongside `somLabels`. `zoom` crops around chosen label numbers and scales them up; an unknown label returns a structured error naming the valid numbers.
+- **Tier-3 power tools.** `javascript` and `cdp_execute` can read `document.cookie` and drive arbitrary input, so they stay out of the default profile view. They are disclosed by `tool_docs(category:'power')` and only unlocked for the session when that call passes `activateForSession: true`.
+
+### Measured, not claimed
+
+4 tasks × 2 arms, one fresh session per cell, numbers read back from the local session DB. Correctness was 4/4 in both arms.
+
+| Task                     | webclaw (calls / s / input tokens) | browser_exec (calls / s / input tokens) |
+| ------------------------ | ---------------------------------- | --------------------------------------- |
+| 40-row typed extraction  | 9 / 16.4 / 36,730                  | 19 / 111.2 / 46,751                     |
+| Wikipedia search         | 13 / — / —                         | 14 / — / —                              |
+| Multi-step click-through | 14 / 31.3 / —                      | 8 / 31 / —                              |
+| Modal-overlay form       | 26 / 18.7 / —                      | 48 / 378 / —                            |
+
+Read these with the usual caveats. The sample is 4 tasks × 2 arms — small. The prompts were not byte-identical in length, so **compare the call counts, not the token columns**. The exec arm's modal-overlay time (378 s) was inflated by its correct refusal of loopback URLs during that run, not by the form interaction itself.
+
+### Verify it yourself
+
+```bash
+# from the repo root
+pnpm --filter chrome-mcp-shared build        # rebuild packages/shared after editing it
+
+cd app/chrome-extension
+npx vitest run                               # full extension suite (76 files / 657 tests)
+npx vue-tsc --noEmit                          # typecheck, must be clean
+npm run build                                 # rebuild the extension bundle
+```
+
+One rule that costs people hours: after `npm run build`, the running extension still uses the OLD bundle. Reload it by POSTing `/reload-extension` to the local bridge, then confirm health at `/ping`.
+
+### Known limits
+
+- The benchmark sample is small (4 tasks × 2 arms) and the prompts differ in length — treat the call-count column as the trustworthy one.
+- `tests/boost-dom-perception-and-execution-pipeline.test.ts` is timing-sensitive and can fail under parallel load; it passes on a re-run.
+- `npm run build` can fail with `EBUSY` while Chrome holds `.output/chrome-mv3` — build elsewhere and mirror, and do not kill Chrome.
+- `browser_exec` refuses loopback/private URLs by design; `file://` URLs and the extension's own tools are unaffected.
+- Connection and execution issues are covered in [docs/TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md).
+
+For an agent-facing handbook covering the repo map, build/test loop, and the rules a change must respect, see [AGENTS.md](./AGENTS.md). A self-contained visual write-up of the tool surface lives at [docs/webclaw.html](./docs/webclaw.html).
+
+---
+
 ## 🎯 Key capabilities
 
 - **Session continuity** – Runs inside your existing Chrome. Google, GitHub, and SSO logins are already there; no profile copying, no re-authentication.
