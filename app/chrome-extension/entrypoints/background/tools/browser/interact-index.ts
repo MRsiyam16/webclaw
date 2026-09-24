@@ -28,6 +28,12 @@ import { animateAgentCursor, animateAgentCursorClick } from './agent-cursor';
 import { captureDeltaIfRequested, ensureSnapshotBaseline } from '../../../../utils/delta-helper';
 import { tabFaviconManager } from './tab-favicon';
 import { startActionNetworkCapture } from '../../../../utils/action-network-capture';
+import {
+  buildResult,
+  evaluatePostConditions,
+  type ActionEvidence,
+  type PostConditionSpec,
+} from './result-envelope';
 
 export interface InteractIndexParams {
   index?: number;
@@ -63,6 +69,8 @@ export interface InteractIndexParams {
   pierceOverlay?: boolean;
   /** Inline capture of network response triggered by this interaction in a single RTT */
   captureNetwork?: CaptureNetworkOptions;
+  /** Optional post-action assertions; results are reported top-level and via the result envelope. */
+  postConditions?: PostConditionSpec[];
 }
 
 /**
@@ -1197,6 +1205,39 @@ export class InteractIndexTool extends BaseBrowserToolExecutor {
 
         const tabHandover = handoverTracker ? await handoverTracker.waitForHandover(800) : null;
 
+        // Post-conditions (additive): re-check element existence/state + URL,
+        // evaluate the caller's specs, merge the envelope fields into the response
+        // WITHOUT touching any legacy field.
+        let postConditionEnvelope: ReturnType<typeof buildResult> | undefined;
+        if (Array.isArray(args.postConditions) && args.postConditions.length > 0) {
+          let elementExists: boolean | undefined;
+          let elementState: string | undefined;
+          if (typeof args.index === 'number' && args.index > 0) {
+            try {
+              const recheck = (
+                await executeInPage(targetScope, 'inPageGetElementCoordinates', [args.index])
+              )?.[0]?.result as any;
+              elementExists = Boolean(recheck?.success);
+              elementState = recheck?.success ? 'present' : 'detached';
+            } catch {}
+          }
+          const postConditions = evaluatePostConditions(args.postConditions, {
+            url: currentUrl,
+            elementExists,
+            elementState,
+          });
+          const evidence: ActionEvidence = {
+            isTrusted: usedNativeCDP,
+            urlChanged,
+            previousUrl,
+            currentUrl,
+            ...(delta ? { delta: delta as any } : {}),
+            ...(perceptiveDelta ? { perceptiveDelta } : {}),
+            ...(deliveryVerified === undefined ? {} : { deliveryVerified }),
+          };
+          postConditionEnvelope = buildResult({ evidence, postConditions });
+        }
+
         return {
           content: [
             {
@@ -1237,6 +1278,14 @@ export class InteractIndexTool extends BaseBrowserToolExecutor {
                     : deliveryVerified
                       ? { deliveryVerified: true }
                       : { deliveryVerified: false, deliveryHits }),
+                  ...(postConditionEnvelope
+                    ? {
+                        postConditions: postConditionEnvelope.postConditions,
+                        verdict: postConditionEnvelope.verdict,
+                        outcome: postConditionEnvelope.outcome,
+                        evidence: postConditionEnvelope.evidence,
+                      }
+                    : {}),
                 },
                 null,
                 2,

@@ -19,6 +19,12 @@ import { getSubframeViewportOffset } from './interact-index';
 import { tabFaviconManager } from './tab-favicon';
 import { computeHumanizedPoints } from '@/utils/mouse-trajectory';
 import { performPhysicalFill } from './fill-core';
+import {
+  buildResult,
+  evaluatePostConditions,
+  type ActionEvidence,
+  type PostConditionSpec,
+} from './result-envelope';
 
 export interface FillIndexParams {
   index: number;
@@ -34,6 +40,8 @@ export interface FillIndexParams {
   includeDelta?: boolean;
   sessionId?: string;
   sessionContext?: string;
+  /** Optional post-action assertions; results are reported top-level and via the result envelope. */
+  postConditions?: PostConditionSpec[];
 }
 
 export class FillIndexTool extends BaseBrowserToolExecutor {
@@ -254,6 +262,42 @@ export class FillIndexTool extends BaseBrowserToolExecutor {
         } else if (!args.pressEnter && !args.submit && !outcome.submitted) {
           (outcome as any).nextActionHint =
             `1-Turn Optimal Paradigm: Pass submit: true or pressEnter: true to ${resolveToolName('fill_index')}, or use ${resolveToolName('batch_actions')} to pipeline fill and submit in 1 turn.`;
+        }
+
+        // Post-conditions (additive): re-read the committed value + current URL,
+        // evaluate the caller's specs, and merge the envelope fields onto the
+        // existing response WITHOUT touching any legacy field.
+        if (Array.isArray(args.postConditions) && args.postConditions.length > 0) {
+          let readBackValue: string | undefined;
+          try {
+            const verifyRes = await executeInPage(
+              { tabId: targetTabId },
+              'inPageVerifyInputCommitment',
+              [args.index, textToFill],
+            );
+            const vRes = verifyRes?.[0]?.result as any;
+            if (vRes && typeof vRes.currentValue === 'string') readBackValue = vRes.currentValue;
+          } catch {}
+
+          const postConditions = evaluatePostConditions(args.postConditions, {
+            readBackValue,
+            url: currentUrl,
+          });
+          const evidence: ActionEvidence = {
+            committed: fillResult.committed === true,
+            method: fillResult.method,
+            isTrusted: fillResult.isTrusted,
+            urlChanged,
+            previousUrl,
+            currentUrl,
+            ...(delta ? { delta: delta as any } : {}),
+            ...(perceptiveDelta ? { perceptiveDelta } : {}),
+          };
+          const envelope = buildResult({ evidence, postConditions });
+          (outcome as any).postConditions = envelope.postConditions;
+          (outcome as any).verdict = envelope.verdict;
+          (outcome as any).outcome = envelope.outcome;
+          (outcome as any).evidence = envelope.evidence;
         }
 
         const seen = new WeakSet();

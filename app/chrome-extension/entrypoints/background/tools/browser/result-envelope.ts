@@ -37,6 +37,138 @@ export interface PostConditionResult {
   evidence: unknown;
 }
 
+export interface PostConditionSpec {
+  condition: PostConditionKind;
+  expected: unknown;
+}
+
+/** Context the tool wires in after acting; each condition derives its `actual` from one field. */
+export interface PostConditionContext {
+  readBackValue?: string;
+  url?: string;
+  elementExists?: boolean;
+  pageText?: string;
+  listCountBefore?: number;
+  listCountAfter?: number;
+  elementState?: string;
+}
+
+const jsonEqual = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * Evaluate post-action conditions, returning one auditable result per spec.
+ * Pass rule: JSON.stringify equality, EXCEPT text_present (substring `include`)
+ * and url_matches (/regex/ literal -> RegExp.test, otherwise exact string equality).
+ */
+export function evaluatePostConditions(
+  specs: PostConditionSpec[],
+  ctx: PostConditionContext,
+): PostConditionResult[] {
+  return (specs || []).map((spec): PostConditionResult => {
+    switch (spec.condition) {
+      case 'value_equals': {
+        const actual = typeof ctx.readBackValue === 'string' ? ctx.readBackValue : undefined;
+        return {
+          condition: spec.condition,
+          expected: spec.expected,
+          actual: actual ?? null,
+          passed: jsonEqual(spec.expected, actual),
+          evidence: { readBackValue: actual ?? null },
+        };
+      }
+      case 'element_exists': {
+        const actual = typeof ctx.elementExists === 'boolean' ? ctx.elementExists : undefined;
+        return {
+          condition: spec.condition,
+          expected: spec.expected,
+          actual: actual ?? null,
+          passed: jsonEqual(spec.expected, actual),
+          evidence: { elementExists: actual ?? null },
+        };
+      }
+      case 'text_present': {
+        // include semantics: passed = pageText contains expected (never prose alone).
+        const haystack = typeof ctx.pageText === 'string' ? ctx.pageText : '';
+        const needle =
+          typeof spec.expected === 'string' ? spec.expected : JSON.stringify(spec.expected);
+        const idx = needle.length > 0 ? haystack.indexOf(needle) : -1;
+        const passed = idx >= 0;
+        const evidence = passed
+          ? haystack.slice(Math.max(0, idx - 40), idx + needle.length + 40)
+          : haystack.slice(0, 200);
+        return {
+          condition: spec.condition,
+          expected: spec.expected,
+          actual: passed,
+          passed,
+          evidence,
+        };
+      }
+      case 'url_matches': {
+        const url = typeof ctx.url === 'string' ? ctx.url : '';
+        const exp = typeof spec.expected === 'string' ? spec.expected : '';
+        const regexLiteral = /^\/(.+)\/([a-z]*)$/i.exec(exp);
+        let passed: boolean;
+        let rule: 'exact' | 'regex';
+        if (regexLiteral) {
+          rule = 'regex';
+          try {
+            passed = new RegExp(regexLiteral[1], regexLiteral[2]).test(url);
+          } catch {
+            passed = false;
+          }
+        } else {
+          rule = 'exact';
+          passed = jsonEqual(spec.expected, ctx.url);
+        }
+        return {
+          condition: spec.condition,
+          expected: spec.expected,
+          actual: url || null,
+          passed,
+          evidence: { url: url || null, rule },
+        };
+      }
+      case 'list_count_delta': {
+        const hasCounts =
+          typeof ctx.listCountBefore === 'number' && typeof ctx.listCountAfter === 'number';
+        const delta = hasCounts
+          ? (ctx.listCountAfter as number) - (ctx.listCountBefore as number)
+          : undefined;
+        return {
+          condition: spec.condition,
+          expected: spec.expected,
+          actual: hasCounts ? delta : null,
+          passed: hasCounts && jsonEqual(spec.expected, delta),
+          evidence: {
+            listCountBefore: ctx.listCountBefore ?? null,
+            listCountAfter: ctx.listCountAfter ?? null,
+            delta: hasCounts ? delta : null,
+          },
+        };
+      }
+      case 'element_state': {
+        const actual = typeof ctx.elementState === 'string' ? ctx.elementState : undefined;
+        return {
+          condition: spec.condition,
+          expected: spec.expected,
+          actual: actual ?? null,
+          passed: jsonEqual(spec.expected, actual),
+          evidence: { elementState: actual ?? null },
+        };
+      }
+      default:
+        return {
+          condition: spec.condition,
+          expected: spec.expected,
+          actual: null,
+          passed: false,
+          evidence: null,
+        };
+    }
+  });
+}
+
 export interface ActionResult<T = unknown> {
   verdict: Verdict;
   outcome: string;
