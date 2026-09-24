@@ -705,6 +705,21 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
           description:
             'Deprecated alias for som; still accepted but hidden from the schema to keep it small. Prefer som.',
         },
+        setOfMark: {
+          type: 'boolean',
+          description: 'Alias for som (Set-of-Mark overlay); accepted for parity with som.',
+        },
+        mode: {
+          type: 'string',
+          description:
+            'Capture mode. "som" = Set-of-Mark: annotated image plus a textual element map on one shared numbering scheme.',
+        },
+        zoom: {
+          type: 'array',
+          items: { type: 'number' },
+          description:
+            "Zoom crop mode: label numbers to zoom into (crop around each label's safe click point, scaled up).",
+        },
         targetIndex: {
           type: 'number',
           description:
@@ -1700,6 +1715,11 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
           description:
             'Maximum text length before truncation for element text content (default: 120)',
         },
+        maxChars: {
+          type: 'number',
+          description:
+            'Hard character budget for the serialized response (default: 120000). When the response would exceed it the payload is cut and carries "truncated": true plus "totalChars" (the true untruncated length).',
+        },
         includeDetails: {
           type: 'boolean',
           description:
@@ -1734,7 +1754,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         deltaOnly: {
           type: 'boolean',
           description:
-            'When true, returns only changed/added/removed diffs compared to the previous snapshot, saving 90%+ tokens on repeated reads.',
+            'Delta mode (default: true). A repeat read that sees a changed DOM returns only changed/added/removed diffs against the previous snapshot, saving 90%+ tokens. Set false to always receive the full tree.',
         },
         dismissOverlays: {
           type: 'boolean',
@@ -1945,6 +1965,34 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
           description:
             'Inline capture of network response triggered by this interaction in a single round-trip',
         },
+        postConditions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              condition: {
+                type: 'string',
+                enum: [
+                  'value_equals',
+                  'element_exists',
+                  'text_present',
+                  'url_matches',
+                  'list_count_delta',
+                  'element_state',
+                ],
+                description:
+                  'Post-action assertion kind evaluated against the page after the action completes.',
+              },
+              expected: {
+                description:
+                  'Expected value for the condition. Pass uses JSON equality, except text_present (substring) and url_matches (exact string or /regex/ literal).',
+              },
+            },
+            required: ['condition', 'expected'],
+          },
+          description:
+            'Optional post-action assertions; one auditable result per spec is reported top-level and via the result envelope (verdict/outcome).',
+        },
       },
       required: [],
     },
@@ -2002,6 +2050,34 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         sessionId: {
           type: 'string',
           description: 'Optional session identifier to bind affinity to a specific tab context',
+        },
+        postConditions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              condition: {
+                type: 'string',
+                enum: [
+                  'value_equals',
+                  'element_exists',
+                  'text_present',
+                  'url_matches',
+                  'list_count_delta',
+                  'element_state',
+                ],
+                description:
+                  'Post-action assertion kind evaluated against the page after the action completes.',
+              },
+              expected: {
+                description:
+                  'Expected value for the condition. Pass uses JSON equality, except text_present (substring) and url_matches (exact string or /regex/ literal).',
+              },
+            },
+            required: ['condition', 'expected'],
+          },
+          description:
+            'Optional post-action assertions; one auditable result per spec is reported top-level and via the result envelope (verdict/outcome).',
         },
       },
       required: ['index'],
@@ -2327,6 +2403,16 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
           type: 'boolean',
           description:
             'Content-only extraction: restrict to the main content region and strip nav/header/footer/aside/form noise before conversion (default: false)',
+        },
+        selector: {
+          type: 'string',
+          description:
+            'CSS selector limiting markdown extraction to that subtree (querySelector) instead of the whole body',
+        },
+        maxLength: {
+          type: 'number',
+          description:
+            'Hard character budget for the returned markdown (default: 120000). Longer markdown is cut and a notice carrying the true original length is appended.',
         },
         tabId: { type: 'number', description: 'Target tab ID (optional)' },
         windowId: { type: 'number', description: 'Target window ID (optional)' },

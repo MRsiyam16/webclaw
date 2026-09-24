@@ -130,6 +130,19 @@
           "type": "boolean",
           "description": "Deprecated alias for som; still accepted but hidden from the schema to keep it small. Prefer som."
         },
+        "setOfMark": {
+          "type": "boolean",
+          "description": "Alias for som (Set-of-Mark overlay); accepted for parity with som."
+        },
+        "mode": {
+          "type": "string",
+          "description": "Capture mode. \"som\" = Set-of-Mark: annotated image plus a textual element map on one shared numbering scheme."
+        },
+        "zoom": {
+          "type": "array",
+          "items": { "type": "number" },
+          "description": "Zoom crop mode: label numbers to zoom into (crop around each label's safe click point, scaled up)."
+        },
         "targetIndex": {
           "type": "number",
           "description": "Compact 1-based numeric index of target element from browserclaw_read_dom to crop and capture only this specific region of interest"
@@ -546,6 +559,31 @@
           },
           "required": ["urlPattern"],
           "description": "Inline capture of network response triggered by this interaction in a single round-trip"
+        },
+        "postConditions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "condition": {
+                "type": "string",
+                "enum": [
+                  "value_equals",
+                  "element_exists",
+                  "text_present",
+                  "url_matches",
+                  "list_count_delta",
+                  "element_state"
+                ],
+                "description": "Post-action assertion kind evaluated against the page after the action completes."
+              },
+              "expected": {
+                "description": "Expected value for the condition. Pass uses JSON equality, except text_present (substring) and url_matches (exact string or /regex/ literal)."
+              }
+            },
+            "required": ["condition", "expected"]
+          },
+          "description": "Optional post-action assertions; one auditable result per spec is reported top-level and via the result envelope (verdict/outcome)."
         }
       },
       "required": []
@@ -603,6 +641,31 @@
         "sessionId": {
           "type": "string",
           "description": "Optional session identifier to bind affinity to a specific tab context"
+        },
+        "postConditions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "condition": {
+                "type": "string",
+                "enum": [
+                  "value_equals",
+                  "element_exists",
+                  "text_present",
+                  "url_matches",
+                  "list_count_delta",
+                  "element_state"
+                ],
+                "description": "Post-action assertion kind evaluated against the page after the action completes."
+              },
+              "expected": {
+                "description": "Expected value for the condition. Pass uses JSON equality, except text_present (substring) and url_matches (exact string or /regex/ literal)."
+              }
+            },
+            "required": ["condition", "expected"]
+          },
+          "description": "Optional post-action assertions; one auditable result per spec is reported top-level and via the result envelope (verdict/outcome)."
         }
       },
       "required": ["index"]
