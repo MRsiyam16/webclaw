@@ -12,7 +12,7 @@ This is a fork: `origin` is `MRsiyam16/webclaw`, `upstream` is `GoldenLoaf24h/br
 | --- | --- |
 | `app/chrome-extension/` | The MV3 Chrome extension. Tool implementations live in `entrypoints/background/tools/browser/*.ts` (one file per tool or tool family: `read-dom.ts`, `interact-index.ts`, `extract-tool.ts`, `screenshot.ts`, `result-envelope.ts`, …). `in-page-engine.ts` is the injected page-side engine (runs in the page, does DOM indexing/refs). Tests live in `app/chrome-extension/tests/`. |
 | `app/native-server/` | The Native Messaging bridge (Fastify). Serves the tools over HTTP + MCP (`/mcp`) on `127.0.0.1:12306`. Package name `mcp-chrome-bridge`. |
-| `packages/shared/src/` | The **declared** tool schemas. `tools.ts` holds `TOOL_SCHEMAS` + `TOOL_DEFINITIONS`; `tool-profiles.ts` holds `TOOL_CATEGORIES` and the tier/profile mapping. Package name `chrome-mcp-shared` — must be built before the extension or tests see changes here. |
+| `packages/shared/src/` | The **declared** tool schemas. `tools.ts` holds `TOOL_SCHEMAS` / `TOOL_NAMES`; `tool-profiles.ts` holds `TOOL_CATEGORIES` and the tier/profile mapping. Package name `chrome-mcp-shared` — must be built before the extension or tests see changes here. |
 | `plugins/browserclaw/` | The Hermes plugin: `core_schemas.json` (tool schema JSON), `plugin.yaml` (`provides_tools`), `__init__.py` (`TOOL_DEFINITIONS`). |
 | `test/` | Root-level e2e harness (`test/e2e/runner.ts`, tiered fixtures). Run with `pnpm test` from the root. |
 | `docs/` | Human docs: `TOOLS.md`, `ARCHITECTURE.md`, `MAP.md`, `TROUBLESHOOTING.md`, and `webclaw.html` (visual write-up). |
@@ -68,7 +68,7 @@ Prove the new code is live by a marker **only the new bundle emits** (a new resp
 
 A tool argument must be declared in **all** of these places, or it will be silently stripped:
 
-1. `packages/shared/src/tools.ts` — the schema (`TOOL_SCHEMAS`, and `TOOL_DEFINITIONS` where the profile/category mapping needs it).
+1. `packages/shared/src/tools.ts` — the schema (`TOOL_SCHEMAS` / `TOOL_NAMES`); `packages/shared/src/tool-profiles.ts` — the category/profile mapping (`TOOL_CATEGORIES`).
 2. The Hermes plugin — mirror the change in `plugins/browserclaw/core_schemas.json`, `plugins/browserclaw/plugin.yaml` (`provides_tools`), and `plugins/browserclaw/__init__.py` (`TOOL_DEFINITIONS`).
 3. The **installed** copy under `%LOCALAPPDATA%/hermes/plugins/browserclaw/`.
 
