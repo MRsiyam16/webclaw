@@ -1,6 +1,6 @@
 <div align="center">
-  <img src="./docs/images/logo.png" width="100" alt="BrowserClaw Logo" />
-  <h1>BrowserClaw</h1>
+  <img src="./docs/images/logo.png" width="100" alt="webclaw Logo" />
+  <h1>webclaw</h1>
   <p><b>Control your everyday Chrome browser from AI agents, without losing logins or focus.</b></p>
   <p>
     <a href="./docs/MAP.md">Project Map</a> ·
@@ -14,21 +14,21 @@
 ---
 
 <details>
-<summary><b>Background: Why BrowserClaw?</b></summary>
+<summary><b>Background: Why webclaw?</b></summary>
 
 <br/>
 
 Browser automation frameworks that drive a separate browser instance (Playwright, Puppeteer, browser-use) start from a clean profile. They do not inherit your active logins, cookies, or extensions, and copying a live Chrome profile on Windows fails with file-sharing locks. Attaching to an existing Chrome via a debug port triggers security banners.
 
-BrowserClaw takes a different route: a Chrome MV3 extension plus a local Native Messaging bridge, running inside the Chrome you already use. Cookies, sessions, and extensions are preserved, and automation happens in background tabs without stealing focus.
+webclaw takes a different route: a Chrome MV3 extension plus a local Native Messaging bridge, running inside the Chrome you already use. Cookies, sessions, and extensions are preserved, and automation happens in background tabs without stealing focus.
 
 </details>
 
 ---
 
-## ⚡ What is BrowserClaw?
+## ⚡ What is webclaw?
 
-BrowserClaw is a Chrome extension + local MCP server that lets AI agents operate your real browser. It exposes 49 tools across 7 categories (navigation, perception, action, observation, management, diagnostics, network), with a minimal 14-tool core profile for everyday sessions.
+webclaw is a Chrome extension + local MCP server that lets AI agents operate your real browser — a fork of BrowserClaw, with the original project preserved as the `upstream` git remote. It exposes 49 tools across 7 categories (navigation, perception, action, observation, management, diagnostics, network), with a minimal 14-tool core profile for everyday sessions.
 
 Two execution paths are available:
 
@@ -40,6 +40,16 @@ Two execution paths are available:
 ## 🧩 What this fork adds
 
 This working copy is a fork of BrowserClaw, published at <https://github.com/MRsiyam16/webclaw>. The original project is preserved as the `upstream` git remote (`GoldenLoaf24h/browserclaw`) so future upstream fixes can still be pulled. The licence is unchanged: AGPL-3.0 at the repo root, MIT under `app/chrome-extension`.
+
+### Naming
+
+The product and this repository are **webclaw**. A few internal identifiers still carry the upstream project's name, deliberately:
+
+- The Hermes plugin's tools are prefixed `browserclaw_*` and live in `plugins/browserclaw/` (installed copy: `%LOCALAPPDATA%/hermes/plugins/browserclaw/`).
+- The Chrome extension's manifest `name` is still `browserclaw`, so that is what `chrome://extensions` displays.
+- Prebuilt release archives are published upstream, so asset names such as `browserclaw-extension-v*.zip` remain correct.
+
+Renaming the plugin prefix would break existing installs, so the mismatch is intentional — not a bug.
 
 Upstream is honest about _what it did_; this fork is built to be honest about _what actually happened_. Its merged-tool work makes every mutating action report its real outcome and shrinks what an agent has to read to find out.
 
@@ -158,8 +168,8 @@ Then load the extension from `app/chrome-extension/.output/chrome-mv3` into `chr
 ### Option 3: Build from source
 
 ```bash
-git clone https://github.com/GoldenLoaf24h/browserclaw.git
-cd browserclaw && pnpm install && pnpm build
+git clone https://github.com/MRsiyam16/webclaw.git
+cd webclaw && pnpm install && pnpm build
 cd app/native-server && node dist/scripts/register-dev.js
 ```
 
@@ -285,4 +295,4 @@ For details, see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md).
 
 ---
 
-BrowserClaw is an independent Chrome extension and MCP automation project. It is not affiliated with the standalone `browserclaw` package on npm.
+webclaw is an independent Chrome extension and MCP automation project, forked from BrowserClaw. It is not affiliated with the standalone `browserclaw` package on npm.
