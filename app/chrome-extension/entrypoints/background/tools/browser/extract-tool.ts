@@ -55,7 +55,12 @@ export class ExtractTool extends BaseBrowserToolExecutor {
       );
 
       const result = results?.[0]?.result;
-      if (!result || typeof result !== 'object' || 'error' in result) {
+      const shaped =
+        result &&
+        typeof result === 'object' &&
+        ('data' in result || 'sourceRefs' in result || 'missing' in result);
+
+      if (!result || typeof result !== 'object' || (!shaped && 'error' in result)) {
         const message =
           result && typeof result === 'object' && 'error' in result
             ? String((result as { error: string }).error)
@@ -63,18 +68,24 @@ export class ExtractTool extends BaseBrowserToolExecutor {
         return createErrorResponse(message);
       }
 
+      const typed = result as ExtractResult;
+      // An unsupported schema shape comes back as a STRUCTURED error (data/missing/
+      // sourceRefs plus `error`) — loud, and never a silent empty.
+      const error = typeof typed.error === 'string' && typed.error.length > 0 ? typed.error : null;
+
       return {
         content: [
           {
             type: 'text',
             text: JSON.stringify({
-              data: result.data ?? {},
-              missing: result.missing ?? [],
-              sourceRefs: result.sourceRefs ?? {},
+              data: typed.data ?? {},
+              missing: typed.missing ?? [],
+              sourceRefs: typed.sourceRefs ?? {},
+              ...(error ? { error } : {}),
             }),
           },
         ],
-        isError: false,
+        isError: Boolean(error),
       };
     } catch (error) {
       return createErrorResponse(

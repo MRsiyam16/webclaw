@@ -2,7 +2,7 @@
  * browser_extract — schema-typed extraction over a document/HTML root.
  *
  * Contract:
- *  - extractFrom(root, schema) -> { data, missing, sourceRefs }
+ *  - extractFrom(root, schema) -> { data, missing, sourceRefs, error? }
  *  - sourceRefs values must match /^e\d+$/
  *  - property lookup order: [data-field="key"] -> #key -> [name="key"] -> label(text contains key)
  *  - labels resolve via `for` -> element, else a wrapped form control inside the label
@@ -11,8 +11,31 @@
  *  - declared numeric types coerce ('£51.77' -> 51.77); a present-but-uncoercible value -> missing
  *  - keys with no source element are reported in `missing`, never invented into data
  *
- * Ref minting: an element's own `data-ref` is honoured; otherwise a stable `e<n>`
- * counter is minted, skipping any ref already used in the document.
+ * Provenance (per VALUE, never constant):
+ *  - sourceRefs[key] is the ref of the element the value was READ FROM. Two values
+ *    read from two different elements therefore carry two different refs.
+ *  - an element's own `data-ref` is honoured; otherwise the ref is that element's
+ *    stable 1-based index in document order (`e<index>`), skipping any index
+ *    already claimed by an explicit data-ref.
+ *
+ * Repeated items (arrays):
+ *  - {"type":"array","items":{"type":"object","properties":{...}}} extracts EVERY
+ *    repeated item in one call -> { data: { items: [ {...}, ... ] } } with
+ *    per-value refs keyed by path (`items[0].title`).
+ *  - item roots are discovered as the deepest repeated sibling group that covers
+ *    the declared properties; no selector is required.
+ *  - an item that cannot yield a declared property keeps it absent and records the
+ *    path (`items[3].price`) in `missing` — never invents a value.
+ *
+ * Loud failures:
+ *  - an unsupported schema shape (non-object/non-array root, nested array-of-arrays,
+ *    an object property declared as a nested array/object, an array schema that
+ *    matches no repeated items) returns a STRUCTURED error in the result:
+ *    { data: {}, missing: [...], sourceRefs: {}, error: '<one line>' }.
+ *    It never returns a silent empty.
+ *
+ * Ref minting: an element's own `data-ref` is honoured; otherwise its document-order
+ * index is used (`e<n>`), bumped past any ref already used in the document.
  *
  * NOTE: this module must stay free of background-only imports (chrome APIs,
  * BaseBrowserToolExecutor, ...) because entrypoints/inpage-engine.ts bundles it
@@ -20,22 +43,34 @@
  */
 
 export interface JsonSchemaProperty {
-  type?: 'string' | 'number' | 'integer' | 'boolean';
+  type?: 'string' | 'number' | 'integer' | 'boolean' | 'array' | 'object';
   description?: string;
   /** Optional explicit CSS selector fallback, tried after the contract lookup order. */
   selector?: string;
+  /** Present only on nested (unsupported) property schemas; used to fail loudly. */
+  items?: unknown;
+  properties?: Record<string, JsonSchemaProperty>;
 }
 
-export interface JsonSchema {
+export interface JsonSchemaObject {
   type: 'object';
   properties: Record<string, JsonSchemaProperty>;
   required?: string[];
 }
 
+export interface JsonSchemaArray {
+  type: 'array';
+  items?: { type?: string; properties?: Record<string, JsonSchemaProperty>; required?: string[] };
+}
+
+export type JsonSchema = JsonSchemaObject | JsonSchemaArray;
+
 export interface ExtractResult {
   data: Record<string, unknown>;
   missing: string[];
   sourceRefs: Record<string, string>;
+  /** One-line reason the schema shape could not be honoured. Absent on success. */
+  error?: string;
 }
 
 type RootInput = ParentNode | string;
@@ -73,15 +108,21 @@ function normalizeKey(value: string): string {
 
 /** Match an attribute exactly, falling back to a normalized (case/separator-insensitive) compare. */
 function findByAttr(root: ParentNode, attr: string, key: string): Element | null {
+  return allByAttr(root, attr, key)[0] ?? null;
+}
+
+/** Every element matching an attribute, exact matches first, then normalized (loose) ones. */
+function allByAttr(root: ParentNode, attr: string, key: string): Element[] {
   const target = normalizeKey(key);
-  let loose: Element | null = null;
+  const exact: Element[] = [];
+  const loose: Element[] = [];
   for (const el of Array.from(root.querySelectorAll(`[${attr}]`))) {
     const value = el.getAttribute(attr);
     if (!value) continue;
-    if (value === key) return el;
-    if (!loose && normalizeKey(value).includes(target)) loose = el;
+    if (value === key) exact.push(el);
+    else if (normalizeKey(value).includes(target)) loose.push(el);
   }
-  return loose;
+  return [...exact, ...loose];
 }
 
 function findById(root: ParentNode, id: string): Element | null {
@@ -93,13 +134,18 @@ function findById(root: ParentNode, id: string): Element | null {
 
 /** Match an element by class name (contains key, case/separator-insensitive). */
 function findByClass(root: ParentNode, key: string): Element | null {
+  return allByClass(root, key)[0] ?? null;
+}
+
+function allByClass(root: ParentNode, key: string): Element[] {
   const target = normalizeKey(key);
-  if (target.length === 0) return null;
+  if (target.length === 0) return [];
+  const out: Element[] = [];
   for (const el of Array.from(root.querySelectorAll('[class]'))) {
     const classes = (el.getAttribute('class') ?? '').split(/\s+/);
-    if (classes.some((c) => normalizeKey(c).includes(target))) return el;
+    if (classes.some((c) => normalizeKey(c).includes(target))) out.push(el);
   }
-  return null;
+  return out;
 }
 
 function toRoot(root: RootInput): ParentNode {
@@ -152,88 +198,302 @@ function findByLabel(root: ParentNode, key: string): Element | null {
   return null;
 }
 
+const REF_RE = /^e\d+$/;
+
+/**
+ * Refs are the element's position in document order (1-based), so every element
+ * has its OWN ref instead of a shared constant. Order maps are cached per
+ * document, which keeps refs stable across repeated extractions of the same page.
+ */
+const orderCache = new WeakMap<Document, Map<Element, number>>();
+const reservedCache = new WeakMap<Document, Set<string>>();
+
+function orderMap(doc: Document): Map<Element, number> {
+  const cached = orderCache.get(doc);
+  if (cached) return cached;
+
+  const map = new Map<Element, number>();
+  const rootEl = doc.documentElement;
+  if (rootEl) {
+    map.set(rootEl, 1);
+    let n = 1;
+    for (const el of Array.from(rootEl.querySelectorAll('*'))) {
+      n += 1;
+      map.set(el, n);
+    }
+  }
+  orderCache.set(doc, map);
+  return map;
+}
+
+/** Explicit data-ref values present in the document — never handed to another element. */
+function reservedRefs(doc: Document): Set<string> {
+  const cached = reservedCache.get(doc);
+  if (cached) return cached;
+
+  const used = new Set<string>();
+  for (const node of Array.from(doc.querySelectorAll('[data-ref]'))) {
+    const value = node.getAttribute('data-ref');
+    if (value && REF_RE.test(value)) used.add(value);
+  }
+  reservedCache.set(doc, used);
+  return used;
+}
+
+function refFor(el: Element): string {
+  const own = el.getAttribute('data-ref');
+  if (own && REF_RE.test(own)) return own;
+
+  const doc = el.ownerDocument;
+  if (!doc) return 'e1';
+
+  const reserved = reservedRefs(doc);
+  let index = orderMap(doc).get(el) ?? 0;
+  if (index === 0) {
+    // Detached / not yet in the document tree: fall back to the next free index.
+    index = 1;
+  }
+  while (reserved.has(`e${index}`)) index += 1;
+  return `e${index}`;
+}
+
 interface Located {
   el: Element;
   ref: string;
 }
 
-const REF_RE = /^e\d+$/;
+/** Every element that could source `key`, in contract lookup-priority order. */
+function allSources(root: ParentNode, key: string, prop: JsonSchemaProperty): Element[] {
+  const found: Element[] = [];
+  const push = (el: Element | null | undefined) => {
+    if (el && !found.includes(el)) found.push(el);
+  };
+
+  push(findByAttr(root, 'data-field', key));
+  push(findById(root, key));
+  push(findByAttr(root, 'name', key));
+  for (const el of allByClass(root, key)) push(el);
+  if (prop?.selector) push(root.querySelector(prop.selector));
+  push(findByLabel(root, key));
+
+  return found;
+}
 
 function findSource(root: ParentNode, key: string, prop: JsonSchemaProperty): Located | null {
+  const el = allSources(root, key, prop)[0];
+  if (!el) return null;
+  return { el, ref: refFor(el) };
+}
+
+/** Extract one declared property from `scope`, writing into the shared result. */
+function extractProperty(
+  scope: ParentNode,
+  key: string,
+  prop: JsonSchemaProperty,
+  path: string,
+  out: { data: Record<string, unknown>; missing: string[]; sourceRefs: Record<string, string> },
+): void {
+  const found = findSource(scope, key, prop ?? {});
+  if (!found) {
+    out.missing.push(path);
+    return;
+  }
+
+  const value = readValue(found.el, prop?.type);
+  if (value === undefined) {
+    out.missing.push(path);
+    return;
+  }
+
+  out.data[key] = value;
+  out.sourceRefs[path] = found.ref;
+}
+
+interface FieldExtract {
+  data: Record<string, unknown>;
+  missing: string[];
+  sourceRefs: Record<string, string>;
+}
+
+/** Extract every declared property of an object schema, scoped to `scope`. */
+function extractFields(scope: ParentNode, schema: JsonSchemaObject, prefix: string): FieldExtract {
+  const out: FieldExtract = { data: {}, missing: [], sourceRefs: {} };
+  const properties = schema?.properties ?? {};
+
+  for (const [key, prop] of Object.entries(properties)) {
+    const path = prefix ? `${prefix}.${key}` : key;
+    extractProperty(scope, key, prop ?? {}, path, out);
+  }
+
+  return out;
+}
+
+/** True when `el` is inside `root`. */
+function isWithin(root: ParentNode, el: Element): boolean {
+  const container = root as unknown as { contains?: (node: Node) => boolean };
+  if (typeof container.contains === 'function') return container.contains(el);
+  return true;
+}
+
+/** Depth of an element from the document root, used to prefer the innermost repetition. */
+function levelOf(el: Element): number {
+  let level = 0;
+  let node: Element | null = el;
+  while (node?.parentElement) {
+    level += 1;
+    node = node.parentElement;
+  }
+  return level;
+}
+
+interface ItemRootCandidate {
+  roots: Element[];
+  coverage: number;
+  level: number;
+}
+
+/**
+ * Discover the repeated item roots for an array schema: the deepest set of sibling
+ * elements that repeats (>1) and together covers the most declared properties.
+ */
+function findItemRoots(
+  root: ParentNode,
+  properties: Record<string, JsonSchemaProperty>,
+): Element[] {
+  const keyByEl = new Map<Element, string[]>();
   const candidates: Element[] = [];
 
-  const byDataField = findByAttr(root, 'data-field', key);
-  if (byDataField) candidates.push(byDataField);
-
-  const byId = findById(root, key);
-  if (byId) candidates.push(byId);
-
-  const byName = findByAttr(root, 'name', key);
-  if (byName) candidates.push(byName);
-
-  const byClass = findByClass(root, key);
-  if (byClass) candidates.push(byClass);
-
-  if (prop?.selector) {
-    const explicit = root.querySelector(prop.selector);
-    if (explicit) candidates.push(explicit);
+  for (const [key, prop] of Object.entries(properties)) {
+    for (const el of allSources(root, key, prop ?? {})) {
+      const keys = keyByEl.get(el) ?? [];
+      if (!keys.includes(key)) keys.push(key);
+      keyByEl.set(el, keys);
+      if (!candidates.includes(el)) candidates.push(el);
+    }
   }
 
-  const byLabel = findByLabel(root, key);
-  if (byLabel) candidates.push(byLabel);
+  if (candidates.length === 0) return [];
 
-  const el = candidates.find((c) => c !== null) ?? null;
-  if (!el) return null;
+  let best: ItemRootCandidate | null = null;
 
-  return { el, ref: refFor(root, el) };
-}
+  for (const candidate of candidates) {
+    let node: Element | null = candidate.parentElement;
+    while (node && isWithin(root, node)) {
+      const parent: Element | null = node.parentElement;
+      if (!parent) break;
 
-function collectUsedRefs(root: ParentNode): Set<string> {
-  const used = new Set<string>();
-  for (const node of Array.from(root.querySelectorAll('[data-ref]'))) {
-    const value = node.getAttribute('data-ref');
-    if (value) used.add(value);
+      const group = Array.from(parent.children).filter((c) => c.tagName === node!.tagName);
+      if (group.length > 1) {
+        const covered = new Set<string>();
+        for (const [el, keys] of Array.from(keyByEl.entries())) {
+          if (!group.some((g) => g === el || g.contains(el))) continue;
+          for (const k of keys) covered.add(k);
+        }
+
+        const level = levelOf(node);
+        if (
+          !best ||
+          covered.size > best.coverage ||
+          (covered.size === best.coverage && level > best.level)
+        ) {
+          best = { roots: group, coverage: covered.size, level };
+        }
+      }
+
+      node = parent;
+    }
   }
-  return used;
+
+  return best?.roots ?? [];
 }
 
-function refFor(root: ParentNode, el: Element): string {
-  const own = el.getAttribute('data-ref');
-  if (own && REF_RE.test(own)) return own;
+function emptyResult(error: string, missing: string[] = []): ExtractResult {
+  return { data: {}, missing, sourceRefs: {}, error };
+}
 
-  const used = collectUsedRefs(root);
-  let n = 1;
-  while (used.has(`e${n}`)) n += 1;
-  return `e${n}`;
+/** One-line reason a schema shape cannot be honoured. */
+function unsupportedRootError(schemaType: unknown): string {
+  const shown = typeof schemaType === 'string' ? schemaType : String(schemaType);
+  return `unsupported schema root type "${shown}": chrome_extract supports {"type":"object"} and {"type":"array","items":{"type":"object"}}`;
 }
 
 export function extractFrom(rootInput: RootInput, schema: JsonSchema): ExtractResult {
   const root = toRoot(rootInput);
 
-  const data: Record<string, unknown> = {};
-  const missing: string[] = [];
-  const sourceRefs: Record<string, string> = {};
+  const rawSchema = schema as unknown as { type?: unknown; properties?: unknown; items?: unknown };
+  const declaredType =
+    typeof rawSchema?.type === 'string'
+      ? rawSchema.type
+      : rawSchema && typeof rawSchema === 'object' && 'properties' in rawSchema
+        ? 'object'
+        : undefined;
 
-  const properties = schema?.properties ?? {};
-
-  for (const [key, prop] of Object.entries(properties)) {
-    const found = findSource(root, key, prop ?? {});
-    if (!found) {
-      missing.push(key);
-      continue;
-    }
-
-    const value = readValue(found.el, prop?.type);
-    if (value === undefined) {
-      missing.push(key);
-      continue;
-    }
-
-    data[key] = value;
-    sourceRefs[key] = found.ref;
+  // ── Loud failure: root shape ────────────────────────────────────────────────
+  if (declaredType !== 'object' && declaredType !== 'array') {
+    return emptyResult(unsupportedRootError(declaredType ?? schema?.type));
   }
 
-  return { data, missing, sourceRefs };
+  // ── Array root: repeated-item extraction ────────────────────────────────────
+  if (declaredType === 'array') {
+    const items = rawSchema.items as
+      | { type?: unknown; properties?: Record<string, JsonSchemaProperty>; required?: string[] }
+      | undefined;
+
+    if (!items || typeof items !== 'object') {
+      return emptyResult('unsupported array schema: "items" must describe an object');
+    }
+    if (items.type === 'array' || Array.isArray((items as { items?: unknown }).items)) {
+      return emptyResult('unsupported nested arrays: an array of arrays is not supported');
+    }
+    if (items.type !== undefined && items.type !== 'object') {
+      return emptyResult(
+        `unsupported array items type "${String(items.type)}": array items must be {"type":"object"}`,
+      );
+    }
+
+    const itemSchema: JsonSchemaObject = {
+      type: 'object',
+      properties: items.properties ?? {},
+      required: items.required,
+    };
+
+    const roots = findItemRoots(root, itemSchema.properties);
+    if (roots.length === 0) {
+      return emptyResult(
+        'unsupported array schema: no repeated item elements matched the declared properties',
+      );
+    }
+
+    const data: Record<string, unknown> = {};
+    const missing: string[] = [];
+    const sourceRefs: Record<string, string> = {};
+
+    data.items = roots.map((itemRoot, index) => {
+      const extracted = extractFields(itemRoot, itemSchema, `items[${index}]`);
+      missing.push(...extracted.missing);
+      Object.assign(sourceRefs, extracted.sourceRefs);
+      return extracted.data;
+    });
+
+    return { data, missing, sourceRefs };
+  }
+
+  // ── Object root ─────────────────────────────────────────────────────────────
+  const properties = (rawSchema.properties ?? {}) as Record<string, JsonSchemaProperty>;
+
+  for (const [key, prop] of Object.entries(properties)) {
+    const nestedType = (prop as { type?: unknown })?.type;
+    if (nestedType === 'array' || nestedType === 'object' || (prop as { items?: unknown })?.items) {
+      // Nested constructs would silently come back empty; fail loudly instead.
+      const shown = nestedType === 'object' ? 'object' : 'array';
+      return emptyResult(
+        `unsupported nested ${shown} at property "${key}": declare the array as the schema root, e.g. {"type":"array","items":{"type":"object"}}`,
+        [key],
+      );
+    }
+  }
+
+  return extractFields(root, { type: 'object', properties }, '');
 }
 
 /**
