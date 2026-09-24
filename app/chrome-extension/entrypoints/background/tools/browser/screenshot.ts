@@ -331,7 +331,71 @@ export interface ResolvedClickPoint {
   occluded: boolean;
 }
 
-export type ZoomResolution = { ok: true; targets: SomLabel[] } | { ok: false; error: string };
+export type ZoomResolution =
+  | { ok: true; targets: SomLabel[] }
+  | { ok: false; error: string; unknown: number[]; validNumbers: number[] };
+
+/** One resolved zoom crop: the label number, its crop box, and the image bytes. */
+export interface ZoomCropImage {
+  n: number;
+  crop: { x: number; y: number; width: number; height: number; scale: number };
+  dataUrl: string;
+}
+
+/**
+ * Outcome of a zoom crop request. A failure is always STRUCTURED (code + the
+ * valid label numbers) so an unknown label can never be silently dropped.
+ */
+export type ZoomCropOutcome =
+  | { ok: true; images: ZoomCropImage[] }
+  | {
+      ok: false;
+      code: 'unknown_som_label';
+      message: string;
+      unknownLabels: number[];
+      validLabels: number[];
+    };
+
+/**
+ * Accepts `zoom` as a single label number or an array of them. A scalar used to
+ * be dropped on the floor (the live defect: `zoom: 2` returned the plain
+ * screenshot with no error); anything non-numeric is now a structured rejection
+ * rather than silence.
+ */
+export function normalizeZoomRequest(
+  value: unknown,
+): { ok: true; labels: number[] } | { ok: false; code: 'invalid_zoom_param'; message: string } {
+  if (value === undefined || value === null) return { ok: true, labels: [] };
+  const raw = Array.isArray(value) ? value : [value];
+  const labels: number[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'number' || !Number.isFinite(item)) {
+      return {
+        ok: false,
+        code: 'invalid_zoom_param',
+        message: `zoom must be a Set-of-Mark label number or an array of them; received ${JSON.stringify(value)}.`,
+      };
+    }
+    const n = Math.trunc(item);
+    if (n > 0 && !labels.includes(n)) labels.push(n);
+  }
+  return { ok: true, labels };
+}
+
+/** Builds the tool result for a rejected zoom request (structured, never silence). */
+export function zoomErrorResponse(
+  failure: { code: string; message: string } & Record<string, unknown>,
+): ToolResult {
+  return {
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify({ success: false, ...failure }, null, 2),
+      },
+    ],
+    isError: true,
+  };
+}
 
 /** 3x3 grid sampled at 15% / 50% / 85% of width and height (the 9-point map). */
 const SOM_SAFE_GRID_RATIOS = [0.15, 0.5, 0.85] as const;
@@ -426,12 +490,15 @@ export function resolveClickPoint(el: Element): ResolvedClickPoint {
 /** Resolves requested zoom label numbers to their labels, erroring with the valid set. */
 export function resolveZoomTargets(labels: SomLabel[], requested: number[]): ZoomResolution {
   const byNumber = new Map(labels.map((label) => [label.n, label]));
+  const validNumbers = labels.map((label) => label.n);
   const unknown = requested.filter((n) => !byNumber.has(n));
   if (unknown.length > 0) {
-    const valid = labels.map((label) => label.n).join(', ');
+    const valid = validNumbers.join(', ');
     return {
       ok: false,
       error: `Unknown Set-of-Mark label number(s): ${unknown.join(', ')}. Valid label numbers: ${valid || '(none)'}.`,
+      unknown,
+      validNumbers,
     };
   }
   return { ok: true, targets: requested.map((n) => byNumber.get(n)!) };
@@ -516,6 +583,51 @@ async function cropZoomRegion(
 }
 
 /**
+ * Zoom crop mode: resolve the requested Set-of-Mark label numbers against the
+ * SAME one-pass label array that produced the drawn marks / element map (no
+ * desync), crop+upscale each label's region, and return the image bytes.
+ *
+ * Unknown label numbers return a structured failure carrying the valid numbers;
+ * the caller must surface that, never swallow it.
+ */
+export async function applyZoomCrops(input: {
+  imageDataUrl: string;
+  labels: SomLabel[];
+  rects: Map<number, { x: number; y: number; width: number; height: number }>;
+  requested: number[];
+  viewport: { width: number; height: number };
+  mimeType: string;
+  quality: number;
+  scale?: number;
+}): Promise<ZoomCropOutcome> {
+  const resolution = resolveZoomTargets(input.labels, input.requested);
+  if (!resolution.ok) {
+    return {
+      ok: false,
+      code: 'unknown_som_label',
+      message: resolution.error,
+      unknownLabels: resolution.unknown,
+      validLabels: resolution.validNumbers,
+    };
+  }
+
+  const images: ZoomCropImage[] = [];
+  for (const target of resolution.targets) {
+    const rect = input.rects.get(target.n) || {
+      x: target.x - 40,
+      y: target.y - 40,
+      width: 80,
+      height: 80,
+    };
+    const crop = clampZoomCrop(rect, input.viewport, input.scale ?? 2);
+    if (!crop) continue;
+    const dataUrl = await cropZoomRegion(input.imageDataUrl, crop, input.mimeType, input.quality);
+    if (dataUrl) images.push({ n: target.n, crop, dataUrl });
+  }
+  return { ok: true, images };
+}
+
+/**
  * Builds SoM labels (one shared array) from the indexed elements returned by
  * inPageDOMPruner. Subframe indices are offset exactly like the badge reindex
  * pass so the numbering matches the drawn badges.
@@ -587,13 +699,17 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
           ? (rawArgs as any).index
           : undefined;
     const grid = rawArgs.grid ?? (rawArgs as any).enableGrid;
-    const zoomRequested = Array.isArray(rawArgs.zoom) ? rawArgs.zoom : undefined;
+    // Zoom accepts a single label number or an array. A non-numeric value is a
+    // structured rejection — the old array-only check silently dropped scalars.
+    const zoomNormalized = normalizeZoomRequest((rawArgs as any).zoom);
+    if (!zoomNormalized.ok) return zoomErrorResponse(zoomNormalized);
+    const zoomRequested: number[] = zoomNormalized.labels;
     const som =
       rawArgs.som === true ||
       (rawArgs as any).highlight === true ||
       (rawArgs as any).setOfMark === true ||
       (rawArgs as any).mode === 'som' ||
-      (zoomRequested?.length ?? 0) > 0;
+      zoomRequested.length > 0;
 
     const args: ScreenshotToolParams = {
       ...rawArgs,
@@ -1119,29 +1235,24 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
       }
 
       // 1.7. Zoom crop mode: crop around each requested label's safe click point
-      if (zoomRequested && zoomRequested.length > 0 && finalImageDataUrl) {
-        const resolution = resolveZoomTargets(somLabels, zoomRequested);
-        if (!resolution.ok) {
-          return createErrorResponse(resolution.error);
-        }
+      if (zoomRequested.length > 0 && finalImageDataUrl) {
         const viewport = {
           width: pageDetails?.viewportWidth ?? finalImageWidthCss ?? 0,
           height: pageDetails?.viewportHeight ?? finalImageHeightCss ?? 0,
         };
         const zoomMime =
           format === 'png' ? 'image/png' : format === 'jpeg' ? 'image/jpeg' : targetMimeType;
-        for (const target of resolution.targets) {
-          const rect = somRects.get(target.n) || {
-            x: target.x - 40,
-            y: target.y - 40,
-            width: 80,
-            height: 80,
-          };
-          const crop = clampZoomCrop(rect, viewport);
-          if (!crop) continue;
-          const dataUrl = await cropZoomRegion(finalImageDataUrl, crop, zoomMime, 0.92);
-          if (dataUrl) somZoomImages.push({ n: target.n, crop, dataUrl });
-        }
+        const zoomOutcome = await applyZoomCrops({
+          imageDataUrl: finalImageDataUrl,
+          labels: somLabels,
+          rects: somRects,
+          requested: zoomRequested,
+          viewport,
+          mimeType: zoomMime,
+          quality: 0.92,
+        });
+        if (!zoomOutcome.ok) return zoomErrorResponse(zoomOutcome);
+        for (const image of zoomOutcome.images) somZoomImages.push(image);
       }
 
       // 2. Process output
@@ -1386,7 +1497,7 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
           assetIndex: args.assetIndex,
           grid: Boolean(args.grid),
           somApplied: didInjectSoM,
-          somMode: enableSoM ? ((zoomRequested?.length ?? 0) > 0 ? 'zoom' : 'som') : undefined,
+          somMode: enableSoM ? (zoomRequested.length > 0 ? 'zoom' : 'som') : undefined,
           elementMap: enableSoM ? buildElementMap(somLabels) : undefined,
           somLabels: enableSoM ? somLabels : undefined,
           zoomCrops:

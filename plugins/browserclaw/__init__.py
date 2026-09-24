@@ -626,7 +626,7 @@ TOOL_DEFINITIONS = {
                 "zoom": {
                   "type": "array",
                   "items": { "type": "number" },
-                  "description": "Zoom crop mode: label numbers to zoom into (crop around each label's safe click point, scaled up)."
+                  "description": "Zoom crop mode: Set-of-Mark label number(s) to zoom into — a single number or an array; the region around each label's safe click point is cropped and upscaled. An unknown label returns a structured error listing the valid label numbers."
                 },
                 "targetIndex": {
                     "type": "number",
