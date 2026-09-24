@@ -996,6 +996,15 @@ function selfHealFindElement(fp: ElementFingerprint): Element | null {
 
 export function findIndexedElement(index: number | string): Element | null {
   const numIdx = typeof index === 'string' && /^\d+$/.test(index) ? parseInt(index, 10) : index;
+  // Persistent refs ('e1','e2',...) resolve through the isolated ref map and are
+  // stable across snapshots, unlike numeric per-snapshot indices.
+  if (typeof index === 'string' && PERSISTENT_REF_PATTERN.test(index)) {
+    const byRef =
+      getPersistentRefMap().resolve(index) ?? getPersistentRefMap().fingerprintHeal(index);
+    if (byRef) return byRef;
+    // Unknown/stale ref: fall through to the legacy resolution paths below so
+    // pre-existing 'e<n>' cache keys (__clawFast.actionElements) keep working.
+  }
   const isolatedMap = getIsolatedIndexMap();
   if (isolatedMap.has(index as any) || isolatedMap.has(numIdx as any)) {
     const el = derefElement(isolatedMap.get(index as any) ?? isolatedMap.get(numIdx as any));
@@ -1063,6 +1072,204 @@ export function findIndexedElement(index: number | string): Element | null {
   }
 
   return null;
+}
+
+/**
+ * Persistent element refs.
+ *
+ * Numeric `index` is a per-snapshot aliasing scheme: it is reassigned on every
+ * read_dom, so a reference captured before a re-render can silently point at a
+ * different node afterwards. A persistent ref is minted once per element
+ * identity and survives DOM mutation that keeps the node alive.
+ *
+ * Lifecycle:
+ *  - mint(el) is idempotent for a live node: re-sighting the SAME node returns
+ *    the SAME ref id.
+ *  - resolve(ref) dereferences a WeakRef and requires the node to still be
+ *    connected; a GC'd or replaced node resolves to null (STALE).
+ *  - fingerprintHeal(ref) recovers the common React/Vue case where a re-render
+ *    replaced the node with an identical one: the fingerprint (tag, stable
+ *    attributes, accessible name, text) finds the replacement and the SAME ref
+ *    id is transferred to it.
+ *  - clear() invalidates every ref (document navigation / frame re-parenting).
+ *  - ids are NEVER recycled: the monotonic counter is per map instance and
+ *    survives clear(), so an invalidated id can never resolve to a new element.
+ *
+ * Storage mirrors getIsolatedIndexMap: a Map<String, WeakRef<Element>> pinned to
+ * globalThis under a registered symbol. Host DOM attributes are never written.
+ */
+const PERSISTENT_REF_MAP_KEY = Symbol.for('__browser_use_persistent_ref_map__');
+
+const PERSISTENT_REF_PATTERN = /^e\d+$/;
+
+export interface RefMap {
+  /** Stable ref ('e1','e2',...) minted once per element identity; re-sighting the SAME node returns the SAME id */
+  mint(el: Element): string;
+  /** null when the node is gone/replaced (stale); never returns a recycled id for a different element */
+  resolve(ref: string): Element | null;
+  /** When resolve() is null but a node with the SAME fingerprint exists, return it, keeping the same ref id */
+  fingerprintHeal(ref: string, root?: ParentNode): Element | null;
+  /** Invalidate every ref (navigation / re-parenting). Ids are NOT recycled afterwards */
+  clear(): void;
+}
+
+/** Snapshot of the properties that identify an element across a re-render. */
+function captureRefFingerprint(el: Element): ElementFingerprint {
+  const attr = (name: string): string | undefined => {
+    try {
+      return el.getAttribute(name) || undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  let inShadowDom = false;
+  try {
+    inShadowDom =
+      typeof el.getRootNode === 'function' &&
+      typeof ShadowRoot !== 'undefined' &&
+      el.getRootNode() instanceof ShadowRoot;
+  } catch {}
+  return {
+    tag: (el.tagName || '').toLowerCase(),
+    id: attr('id'),
+    name: attr('name'),
+    type: attr('type'),
+    placeholder: attr('placeholder'),
+    testId: attr('data-testid'),
+    ariaLabel: attr('aria-label'),
+    role: attr('role'),
+    text: (el.textContent || '').trim().slice(0, 100) || undefined,
+    inShadowDom,
+  };
+}
+
+/** True when `el` is a plausible re-render replacement for `fp`. */
+function matchesRefFingerprint(el: Element, fp: ElementFingerprint): boolean {
+  if (!el || (el.tagName || '').toLowerCase() !== fp.tag) return false;
+  const stableAttrs: Array<[string, string | undefined]> = [
+    ['id', fp.id],
+    ['name', fp.name],
+    ['type', fp.type],
+    ['placeholder', fp.placeholder],
+    ['data-testid', fp.testId],
+    ['aria-label', fp.ariaLabel],
+    ['role', fp.role],
+  ];
+  let wanted = 0;
+  let matched = 0;
+  for (const [name, value] of stableAttrs) {
+    if (!value) continue;
+    wanted++;
+    if (el.getAttribute(name) === value) matched++;
+  }
+  if (wanted > 0 && matched === 0) return false;
+  if (fp.text) {
+    const text = (el.textContent || '').trim();
+    if (!(
+      text === fp.text ||
+      (text.length > 0 && fp.text.length > 0 && (text.includes(fp.text) || fp.text.includes(text)))
+    )) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function findElementByFingerprint(fp: ElementFingerprint, root: ParentNode): Element | null {
+  let candidates: Element[] = [];
+  try {
+    candidates = Array.from(root.querySelectorAll(fp.tag ? fp.tag : '*')) as Element[];
+  } catch {
+    return null;
+  }
+  for (const cand of candidates) {
+    if (matchesRefFingerprint(cand, fp)) return cand;
+  }
+  return null;
+}
+
+/**
+ * Create an isolated persistent ref map. Each instance owns its own id counter.
+ */
+export function createRefMap(): RefMap {
+  let refs = new Map<string, WeakRef<Element>>();
+  let elToRef = new WeakMap<Element, string>();
+  const fingerprints = new Map<string, ElementFingerprint>();
+  let counter = 0;
+
+  const resolve = (ref: string): Element | null => {
+    if (typeof ref !== 'string' || !PERSISTENT_REF_PATTERN.test(ref)) return null;
+    const wrapped = refs.get(ref);
+    if (!wrapped) return null;
+    const el = derefElement(wrapped);
+    if (!el) return null;
+    if (typeof (el as any).isConnected === 'boolean') {
+      return (el as any).isConnected ? el : null;
+    }
+    const doc = typeof document !== 'undefined' ? document : undefined;
+    if (!doc || typeof doc.contains !== 'function') return el;
+    return doc.contains(el) ? el : null;
+  };
+
+  return {
+    mint(el: Element): string {
+      const existing = elToRef.get(el);
+      if (existing) {
+        // Keep the weak ref fresh: identity is unchanged, so the id is unchanged.
+        if (!refs.get(existing)?.deref()) {
+          refs.set(existing, wrapElement(el));
+        }
+        return existing;
+      }
+      const id = `e${++counter}`;
+      elToRef.set(el, id);
+      refs.set(id, wrapElement(el));
+      fingerprints.set(id, captureRefFingerprint(el));
+      return id;
+    },
+
+    resolve,
+
+    fingerprintHeal(ref: string, root?: ParentNode): Element | null {
+      const live = resolve(ref);
+      if (live) return live;
+      const fp = fingerprints.get(ref);
+      if (!fp) return null;
+      const explicitRoot = root ?? null;
+      let found: Element | null = explicitRoot ? findElementByFingerprint(fp, explicitRoot) : null;
+      if (!found && typeof document !== 'undefined') {
+        found = selfHealFindElement(fp);
+      }
+
+      if (!found) return null;
+      // Transfer the identity: the healed node keeps the SAME ref id.
+      elToRef.set(found, ref);
+      refs.set(ref, wrapElement(found));
+      fingerprints.set(ref, captureRefFingerprint(found));
+      return found;
+    },
+
+    clear(): void {
+      refs = new Map<string, WeakRef<Element>>();
+      elToRef = new WeakMap<Element, string>();
+      fingerprints.clear();
+      // counter is deliberately NOT reset: stale ids must never be recycled.
+    },
+  };
+}
+
+/**
+ * Process-wide persistent ref map for the in-page engine. Pinned to globalThis
+ * under a registered symbol for the same reason as the isolated index map: the
+ * engine is injected as a file and re-executes, so a module-scope map would be
+ * silently rebuilt between the writing and reading tool calls.
+ */
+export function getPersistentRefMap(): RefMap {
+  const g = globalThis as any;
+  if (!g[PERSISTENT_REF_MAP_KEY]) {
+    g[PERSISTENT_REF_MAP_KEY] = createRefMap();
+  }
+  return g[PERSISTENT_REF_MAP_KEY] as RefMap;
 }
 
 /**
@@ -2377,6 +2584,7 @@ export function inPageDOMPruner(options?: {
   > = {};
 
   const isolatedMap = getIsolatedIndexMap();
+  const persistentRefMap = getPersistentRefMap();
   if (startingIndex === 1) {
     isolatedMap.clear();
     getIndexFingerprintMap().clear();
@@ -3385,6 +3593,8 @@ export function inPageDOMPruner(options?: {
 
     const assignedIndex = nextIndex++;
     isolatedMap.set(assignedIndex, wrapElement(cand.node));
+    // Persistent ref: stable across re-renders, unlike the per-snapshot `index`.
+    const persistentRef = persistentRefMap.mint(cand.node);
     const gFast = globalThis as any;
     if (gFast.__clawFast) {
       gFast.__clawFast.nodes.set(assignedIndex, cand.node);
@@ -3670,6 +3880,7 @@ export function inPageDOMPruner(options?: {
       actionTriggerType: (cand as any).actionTriggerType || undefined,
     };
 
+    (indexedElem as unknown as { ref?: string }).ref = persistentRef;
     indexedElements.push(indexedElem);
     treeOutputItems.push({ type: 'element', el: indexedElem });
     prunedElementCount++;
