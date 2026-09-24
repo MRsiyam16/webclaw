@@ -102,7 +102,9 @@ describe('GitHub Issue #3: Dynamic Index Drift, Active Element Focus Guard & Ant
         return [{ result: { success: true } }] as any;
       });
 
-      vi.spyOn(cdpSessionManager, 'withSession').mockImplementation(async (_tabId, _tag, fn) => fn());
+      vi.spyOn(cdpSessionManager, 'withSession').mockImplementation(async (_tabId, _tag, fn) =>
+        fn(),
+      );
       vi.spyOn(cdpSessionManager, 'sendCommand').mockResolvedValue({});
 
       const result = await fillCore.performPhysicalFill({
@@ -291,6 +293,32 @@ describe('GitHub Issue #3: Dynamic Index Drift, Active Element Focus Guard & Ant
       expect(verified.committed).toBe(true);
       expect(verified.currentValue).toBe('March');
     });
+
+    it('reads the element own value when the combobox control IS the <input> itself (Wikipedia Codex typeahead)', () => {
+      // Real-world shape: <input type="search" role="combobox" aria-expanded="true" value="Neo4j">
+      // The element has no <input> child and no textContent, so the combobox branch must
+      // fall back to the element's own .value or a successful fill is reported as a mismatch.
+      const input = document.createElement('input');
+      input.type = 'search';
+      input.setAttribute('role', 'combobox');
+      input.setAttribute('aria-expanded', 'true');
+      input.value = 'Neo4j';
+      document.body.appendChild(input);
+
+      getIsolatedIndexMap().set(9, input);
+
+      const verified = inPageVerifyInputCommitment(9, 'Neo4j');
+      expect(verified.committed).toBe(true);
+      expect(verified.currentValue).toBe('Neo4j');
+      expect(verified.diagnostics).toBeUndefined();
+
+      // A genuinely wrong value must STILL be diagnosed
+      input.value = 'Cypher';
+      const mismatch = inPageVerifyInputCommitment(9, 'Neo4j');
+      expect(mismatch.committed).toBe(false);
+      expect(mismatch.currentValue).toBe('Cypher');
+      expect(mismatch.diagnostics).toContain('did not match expected');
+    });
   });
 
   describe('4. Scope Scrutiny in read_dom for form selector', () => {
@@ -323,7 +351,9 @@ describe('GitHub Issue #3: Dynamic Index Drift, Active Element Focus Guard & Ant
 
       expect(data.selectorMatched).toBe(false);
       expect(data.message).toContain('No elements matching selector "form" found on page');
-      expect(data.suggestion).toContain("Modern div-based SPAs often do not use native <form> tags. Try targeting '[role=\"form\"]'");
+      expect(data.suggestion).toContain(
+        'Modern div-based SPAs often do not use native <form> tags. Try targeting \'[role="form"]\'',
+      );
       expect(data.diagnostic).toContain('Selector "form" matched 0 elements');
     });
   });

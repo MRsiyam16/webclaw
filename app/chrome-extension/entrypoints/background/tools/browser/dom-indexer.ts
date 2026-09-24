@@ -6511,6 +6511,12 @@ export function inPageVerifyInputCommitment(
     }
     const innerInput = el.querySelector('input');
     const innerVal = innerInput?.value || '';
+    // The combobox control may ITSELF be the <input> (e.g. <input type="search" role="combobox">
+    // as used by Wikipedia's Codex typeahead, Google and Amazon). For such elements
+    // querySelector('input') is null and textContent is empty, so the element's own value must be
+    // read too — otherwise a successful fill is reported as `Combobox value ("") did not match`.
+    const ownVal =
+      typeof (el as HTMLInputElement).value === 'string' ? (el as HTMLInputElement).value : '';
     const currentText = el.textContent?.trim() || '';
     const ariaVal = el.getAttribute('aria-valuenow') || '';
     const dataVal = el.getAttribute('data-value') || el.getAttribute('value') || '';
@@ -6541,13 +6547,20 @@ export function inPageVerifyInputCommitment(
       (ariaSelectedText && cleanAndNormalizeText(ariaSelectedText).toLowerCase() === normExp) ||
       (ariaVal && cleanAndNormalizeText(ariaVal).toLowerCase() === normExp) ||
       (dataVal && cleanAndNormalizeText(dataVal).toLowerCase() === normExp) ||
+      (ownVal && cleanAndNormalizeText(ownVal).toLowerCase() === normExp) ||
       (innerVal && cleanAndNormalizeText(innerVal).toLowerCase() === normExp) ||
       (currentText && cleanAndNormalizeText(currentText).toLowerCase() === normExp) ||
       (currentText && wordRegex.test(cleanAndNormalizeText(currentText))),
     );
 
     const displayVal =
-      selectedOptionText || ariaSelectedText || innerVal || currentText || ariaVal || dataVal;
+      selectedOptionText ||
+      ariaSelectedText ||
+      ownVal ||
+      innerVal ||
+      currentText ||
+      ariaVal ||
+      dataVal;
     return {
       committed,
       currentValue: displayVal,
