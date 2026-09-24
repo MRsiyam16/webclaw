@@ -14,6 +14,91 @@ import { waitForPageSettle } from '@/utils/action-watchdog';
 import { cdpSessionManager } from '@/utils/cdp-session-manager';
 import { scrubUrl } from '@/utils/url-sanitizer';
 import { budgetText, DEFAULT_OUTPUT_BUDGET_CHARS } from './text-budget';
+import { foldList, renderFoldMarker, isFoldableRow, type FoldableNode } from '@/utils/list-fold';
+
+/**
+ * Compact-format list folding: collapse consecutive near-duplicate list rows
+ * (li / role=listitem) into the representative's line plus a refs marker that
+ * still enumerates every folded ref. Only lines that map to an indexed
+ * list-item element are touched, so frame markers, visual-asset lines and
+ * counter lines pass through unchanged. The full tree is never folded — folding
+ * is a compact-format feature only.
+ */
+function foldCompactListLines(
+  treeString: string,
+  indexedElements: IndexedElement[] | undefined,
+): string {
+  if (!treeString || !Array.isArray(indexedElements) || indexedElements.length === 0) {
+    return treeString;
+  }
+
+  const byIndex = new Map<number, IndexedElement>();
+  for (const el of indexedElements) {
+    if (typeof el.index === 'number') byIndex.set(el.index, el);
+  }
+
+  const asFoldable = (el: IndexedElement): FoldableNode => ({
+    ref: `e${el.index}`,
+    tag: el.role || el.tagName,
+    text: el.text || '',
+  });
+
+  const lines = treeString.split('\n');
+  const out: string[] = [];
+  let foldedAny = false;
+  let i = 0;
+
+  while (i < lines.length) {
+    const headMatch = /^\[(\d+)\]/.exec(lines[i]);
+    const headEl = headMatch ? byIndex.get(Number(headMatch[1])) : undefined;
+    if (!headEl || !isFoldableRow(asFoldable(headEl))) {
+      out.push(lines[i]);
+      i++;
+      continue;
+    }
+
+    // Collect the contiguous run of compact list-item lines.
+    const run: { node: FoldableNode; lineIndex: number }[] = [];
+    let j = i;
+    while (j < lines.length) {
+      const m = /^\[(\d+)\]/.exec(lines[j]);
+      const el = m ? byIndex.get(Number(m[1])) : undefined;
+      if (!el) break;
+      const node = asFoldable(el);
+      if (!isFoldableRow(node)) break;
+      run.push({ node, lineIndex: j });
+      j++;
+    }
+
+    const { groups } = foldList(run.map((r) => r.node));
+    if (groups.length === 0) {
+      for (const r of run) out.push(lines[r.lineIndex]);
+      i = j;
+      continue;
+    }
+
+    // Re-emit the run: rows before a group pass through, each group becomes its
+    // representative's line plus the marker.
+    let cursor = 0;
+    for (const group of groups) {
+      while (cursor < run.length && run[cursor].node.ref !== group.representative.ref) {
+        out.push(lines[run[cursor].lineIndex]);
+        cursor++;
+      }
+      if (cursor >= run.length) break;
+      out.push(`${lines[run[cursor].lineIndex]} ${renderFoldMarker(group)}`);
+      cursor += group.count;
+      foldedAny = true;
+    }
+    while (cursor < run.length) {
+      out.push(lines[run[cursor].lineIndex]);
+      cursor++;
+    }
+    i = j;
+  }
+
+  return foldedAny ? out.join('\n') : treeString;
+}
 
 export interface ReadDOMParams {
   viewportThreshold?: number;
@@ -523,6 +608,16 @@ export class ReadDOMTool extends BaseBrowserToolExecutor {
             isError: false,
           };
         }
+      }
+
+      // Compact list folding: only the compact format folds, and only for
+      // list-item rows that were indexed. Done before pagination so the cursor
+      // and totalElements reflect the folded payload.
+      if ((args.format ?? 'compact') === 'compact') {
+        mergedData.treeString = foldCompactListLines(
+          mergedData.treeString,
+          mergedData.indexedElements,
+        );
       }
 
       // Record snapshot in cache manager (P1-6)
