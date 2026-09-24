@@ -351,6 +351,7 @@ export class FillIndexTool extends BaseBrowserToolExecutor {
         // existing response WITHOUT touching any legacy field.
         if (Array.isArray(args.postConditions) && args.postConditions.length > 0) {
           let readBackValue: string | undefined;
+          let readBackAvailable = false;
           try {
             const verifyRes = await executeInPage(
               { tabId: targetTabId },
@@ -358,12 +359,27 @@ export class FillIndexTool extends BaseBrowserToolExecutor {
               [args.index, textToFill],
             );
             const vRes = verifyRes?.[0]?.result as any;
-            if (vRes && typeof vRes.currentValue === 'string') readBackValue = vRes.currentValue;
+            if (vRes && typeof vRes.currentValue === 'string') {
+              readBackValue = vRes.currentValue;
+              readBackAvailable = true;
+            }
           } catch {}
+
+          // A1: a submit that navigated replaced the document, so index [N] now
+          // resolves against the NEW page — the live Wikipedia case read the new
+          // page's empty search box and reported a successful fill as 'failed'.
+          // The engine's own commitment verification (it refuses to report
+          // committed otherwise) is the read-back taken BEFORE the submit, so a
+          // value assertion is evaluated from that instead of the post-nav DOM.
+          const navigated = urlChanged || !readBackAvailable;
+          const preNavReadBack =
+            navigated && fillResult.committed === true ? textToFill : undefined;
 
           const postConditions = evaluatePostConditions(args.postConditions, {
             readBackValue,
             url: currentUrl,
+            navigated,
+            preNavReadBack,
           });
           const evidence: ActionEvidence = {
             committed: fillResult.committed === true,

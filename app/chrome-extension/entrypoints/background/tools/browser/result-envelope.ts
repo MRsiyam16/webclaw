@@ -51,6 +51,18 @@ export interface PostConditionContext {
   listCountBefore?: number;
   listCountAfter?: number;
   elementState?: string;
+  /**
+   * The document/URL was replaced by the action (a submit navigated). Indexes
+   * now resolve against the NEW document, so a post-action read of the same
+   * index is NOT evidence about what the action did.
+   */
+  navigated?: boolean;
+  /**
+   * The value the engine itself verified at commit time (its own commitment
+   * read, taken before any navigation). Only meaningful together with
+   * `navigated` — see the value_equals branch.
+   */
+  preNavReadBack?: string;
 }
 
 const jsonEqual = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
@@ -67,13 +79,28 @@ export function evaluatePostConditions(
   return (specs || []).map((spec): PostConditionResult => {
     switch (spec.condition) {
       case 'value_equals': {
-        const actual = typeof ctx.readBackValue === 'string' ? ctx.readBackValue : undefined;
+        const postRead = typeof ctx.readBackValue === 'string' ? ctx.readBackValue : undefined;
+        const preNav = typeof ctx.preNavReadBack === 'string' ? ctx.preNavReadBack : undefined;
+        // A submit that navigated replaced the document: the element behind this
+        // index is (probably) a different node on a different page, so the
+        // post-action read cannot testify about what we filled. The engine's own
+        // commitment read, taken before the submit, can — evaluating from it is
+        // what stops a successful fill from being reported as 'failed'.
+        const usePreNav = ctx.navigated === true && preNav !== undefined && postRead !== preNav;
+        const actual = usePreNav ? preNav : (postRead ?? null);
         return {
           condition: spec.condition,
           expected: spec.expected,
-          actual: actual ?? null,
+          actual,
           passed: jsonEqual(spec.expected, actual),
-          evidence: { readBackValue: actual ?? null },
+          evidence: usePreNav
+            ? {
+                navigated: true,
+                preNavReadBack: preNav,
+                postNavReadBack: postRead ?? null,
+                source: 'pre_navigation_commitment_read',
+              }
+            : { readBackValue: actual ?? null },
         };
       }
       case 'element_exists': {
