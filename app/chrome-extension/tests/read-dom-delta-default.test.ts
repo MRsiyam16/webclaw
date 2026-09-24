@@ -65,13 +65,27 @@ describe('read_dom delta-only default', () => {
     expect(payload.snapshotId).toBeTruthy();
   });
 
-  it('falls back to the full tree when nothing changed', async () => {
+  it('returns the full tree when nothing changed and deltaOnly is explicitly false', async () => {
     const els = [el(1, 'Submit')];
     await readDom(880_003, els);
 
-    const payload = await readDom(880_003, els);
+    // `deltaOnly: false` is the escape hatch: an unchanged repeat must still
+    // ship the full tree when the caller opts out of the delta protocol.
+    const payload = await readDom(880_003, els, { deltaOnly: false });
 
     expect(payload.treeString).toContain('Submit');
+    expect(payload.snapshotId).toBeTruthy();
+  });
+
+  it('returns the compact unchanged payload on a default repeat read with an unchanged DOM', async () => {
+    const els = [el(1, 'Submit')];
+    await readDom(880_005, els); // first read seeds the baseline
+
+    const payload = await readDom(880_005, els); // default: deltaOnly is not passed
+
+    expect(payload.unchanged).toBe(true);
+    // A no-change re-read must not ship the full tree.
+    expect(payload.treeString).toBeUndefined();
     expect(payload.snapshotId).toBeTruthy();
   });
 

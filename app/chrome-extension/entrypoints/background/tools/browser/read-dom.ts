@@ -448,7 +448,6 @@ export class ReadDOMTool extends BaseBrowserToolExecutor {
       // DOM returns only the changed/added/removed diff. The first read on a page
       // has no baseline, so it returns the full tree and seeds the diff.
       // `deltaOnly: false` is the escape hatch and always returns the full tree.
-      const explicitDelta = args.deltaOnly === true;
       if (args.deltaOnly !== false && tab.id) {
         const diff = snapshotCacheManager.diffWithPrevious(
           tab.id,
@@ -460,11 +459,13 @@ export class ReadDOMTool extends BaseBrowserToolExecutor {
           elements: mergedData.indexedElements,
         });
 
-        // Unchanged: only an explicitly opted-in caller gets the compact
-        // "unchanged" protocol. By default this falls through to the full tree,
-        // so a client that never asked for deltas cannot end up holding a
-        // partial view.
-        if (diff.isDelta && diff.unchanged && explicitDelta) {
+        // Unchanged: the whole point of the default delta path is that a
+        // no-change re-read costs almost nothing, so it returns the compact
+        // "unchanged" protocol. Falling through to the full tree here (as it did
+        // while deltas were opt-in) made the default path pay full price for a
+        // page that had not moved. Callers that want the tree unconditionally
+        // pass `deltaOnly: false`.
+        if (diff.isDelta && diff.unchanged) {
           return {
             content: [
               {

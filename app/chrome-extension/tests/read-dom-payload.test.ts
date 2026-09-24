@@ -54,7 +54,10 @@ describe('chrome_read_dom payload shape', () => {
   });
 
   it('returns the detail blocks when includeDetails is set', async () => {
-    const payload = await runReadDom({ includeDetails: true });
+    // Opt out of the now-default delta read: the second read on this tab id
+    // has an unchanged baseline and would otherwise return the compact
+    // "unchanged" payload instead of the full detail blocks.
+    const payload = await runReadDom({ includeDetails: true, deltaOnly: false });
 
     expect(Array.isArray(payload.indexedElements)).toBe(true);
     expect(payload.indexedElements).toHaveLength(2);
@@ -72,7 +75,9 @@ describe('chrome_read_dom payload shape', () => {
       title: 'X',
     });
 
-    const res = await mod.readDOMTool.execute({} as any);
+    // deltaOnly: false keeps this on the full-tree path (the repeat read on
+    // this tab id would otherwise answer with the compact unchanged payload).
+    const res = await mod.readDOMTool.execute({ deltaOnly: false } as any);
     const text = res.content[0].text as string;
     spy.mockRestore();
 
@@ -81,7 +86,7 @@ describe('chrome_read_dom payload shape', () => {
   });
 
   it('is a smaller payload than the pre-change shape for the same page', async () => {
-    const payload = await runReadDom();
+    const payload = await runReadDom({ deltaOnly: false });
     const compact = JSON.stringify(payload);
     const legacyShape = JSON.stringify(
       { ...payload, indexedElements: SAMPLE.indexedElements, indexMap: SAMPLE.indexMap },
