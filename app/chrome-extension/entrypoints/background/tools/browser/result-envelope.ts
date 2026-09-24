@@ -244,9 +244,20 @@ export function buildResult(input: {
     evidence.perceptiveDelta?.progressChanged === true ||
     evidence.committed === true;
 
-  let verdict: Verdict = changed ? 'applied' : 'noop';
-  if (failedCond) verdict = 'failed';
-  if (recovery?.code === 'stale_ref') verdict = 'stale_ref';
+  let verdict: Verdict;
+  if (failedCond) {
+    verdict = 'failed';
+  } else if (recovery?.code === 'stale_ref') {
+    verdict = 'stale_ref';
+  } else if (!changed) {
+    verdict = 'noop';
+  } else {
+    // A change happened; it is only 'applied' when at least one post-condition
+    // PASSED and confirmed it. With no post-conditions (or none passing) the
+    // change is real but unverified -> 'applied_unverified'.
+    const confirmed = postConditions.some((p) => p.passed);
+    verdict = confirmed ? 'applied' : 'applied_unverified';
+  }
 
   const outcome = failedCond
     ? `${failedCond.condition} failed: expected ${JSON.stringify(failedCond.expected)}, got ${JSON.stringify(failedCond.actual)}`
@@ -254,7 +265,9 @@ export function buildResult(input: {
       ? 'no change detected'
       : verdict === 'stale_ref'
         ? `stale ref: ${recovery?.message}`
-        : 'change detected';
+        : verdict === 'applied_unverified'
+          ? 'change detected, not verified by a post-condition'
+          : 'change detected';
 
   return { verdict, outcome, evidence, postConditions, data, recovery };
 }

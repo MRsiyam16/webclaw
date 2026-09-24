@@ -152,7 +152,7 @@ describe('stale_ref recovery with fresh refs', () => {
       },
       postConditions: [],
     });
-    expect(ok.verdict).toBe('applied');
+    expect(ok.verdict).toBe('applied_unverified');
     expect(ok.recovery).toBeUndefined();
   });
 });
