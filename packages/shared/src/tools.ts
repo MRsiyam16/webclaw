@@ -636,7 +636,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
       openWorldHint: false,
     },
     description:
-      '[Prefer chrome_read_dom over taking a screenshot] Take a screenshot of the current page or a specific element. Returns base64 image directly in MCP image content block without writing to disk. By default, output is compressed JPEG with maxWidth <= 1280px. Debug disk save is available via savePng/saveToDisk into system temporary directory.',
+      '[Prefer chrome_read_dom over taking a screenshot] Capture a screenshot for visual evidence or QA. Returns base64 image directly in MCP image content block; optionally save an evidence artifact with savePng/saveToDisk. A successful disk save returns fullPath.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -688,12 +688,12 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         savePng: {
           type: 'boolean',
           description:
-            'Save screenshot to system temporary directory for debugging (default: false, zero disk write by default)',
+            'Save the screenshot as an evidence artifact (default: false). The response includes fullPath when saved.',
         },
         saveToDisk: {
           type: 'boolean',
           description:
-            'Deprecated alias for savePng (default: false, zero disk write by default; saves to system temp, not Downloads). Prefer savePng.',
+            'Alias for savePng (default: false). Saves an evidence artifact and returns fullPath when available.',
         },
         som: {
           type: 'boolean',
@@ -1708,7 +1708,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         limit: {
           type: 'number',
           description:
-            'Maximum number of indexed elements to return for current page cursor slice (default: unlimited)',
+            'Maximum indexed elements per page (default: 40); use cursor for remaining elements.',
         },
         maxTextLength: {
           type: 'number',
@@ -1724,6 +1724,10 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
           type: 'boolean',
           description:
             'Also return the bulky indexedElements/indexMap detail blocks (geometry, occlusion flags, safe click points). Off by default because the tree already carries index/tag/attributes/text; enable only when you need per-element rects or visibility flags.',
+        },
+        includeAssets: {
+          type: 'boolean',
+          description: 'Include visual asset lines and asset metadata (default: false).',
         },
         viewportOnly: {
           type: 'boolean',
@@ -2095,7 +2099,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
     description:
       'Execute a sequential multi-step pipeline of browser actions in a single round-trip without waiting for intermediate model turns.\n' +
       '* CRITICAL EFFICIENCY RULE: When the next 2+ actions are predictable (e.g. form filling: [fill username, fill password, click submit]; or search flow: [fill query, press Enter, wait]), ALWAYS use chrome_batch_actions instead of individual tool calls. It completes the entire sequence in 1 turn (3~5x faster, 75%+ lower token cost).\n' +
-      '* Supported action types: click, double_click, right_click, fill, hover, scroll, press_key, wait, fill_form, assert, extract.\n' +
+      '* Supported action types: click, double_click, right_click, fill, hover, scroll, press_key, wait, waitForSelector, waitForUrl, fill_form, assert, extract.\n' +
       '* Set includeDelta: true to automatically inspect DOM changes after the pipeline completes.',
     inputSchema: {
       type: 'object',
@@ -2116,6 +2120,8 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
                   'scroll',
                   'press_key',
                   'wait',
+                  'waitForSelector',
+                  'waitForUrl',
                   'key',
                   'fill_form',
                   'assert',
@@ -2147,38 +2153,60 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
                   'Whether to automatically submit the form after filling (clicks detected submit button or presses Enter) (for type: fill)',
               },
               fields: {
-                type: 'array',
-                items: {
-                  type: 'object',
-                  properties: {
-                    ref: {
-                      type: ['string', 'number'],
-                      description: 'Target element numeric index or ref from chrome_read_dom',
-                    },
-                    index: {
-                      type: 'number',
-                      description: 'Alias for ref',
-                    },
-                    selector: {
-                      type: 'string',
-                      description: 'CSS selector or XPath for target field',
-                    },
-                    value: {
-                      type: ['string', 'number', 'boolean'],
-                      description: 'Value to fill or select',
-                    },
-                    text: {
-                      type: 'string',
-                      description: 'Alias for value',
-                    },
-                    clear: {
-                      type: 'boolean',
-                      description: 'Clear field before typing (default: true)',
+                oneOf: [
+                  {
+                    type: 'object',
+                    additionalProperties: { type: ['string', 'number', 'boolean'] },
+                  },
+                  {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        ref: {
+                          type: ['string', 'number'],
+                          description: 'Target element numeric index or ref from chrome_read_dom',
+                        },
+                        index: {
+                          type: 'number',
+                          description: 'Alias for ref',
+                        },
+                        selector: {
+                          type: 'string',
+                          description: 'CSS selector or XPath for target field',
+                        },
+                        label: {
+                          type: 'string',
+                          description:
+                            'Visible field label or accessible name to resolve unambiguously.',
+                        },
+                        formSelector: {
+                          type: 'string',
+                          description: 'Optional CSS selector limiting label matching to a form.',
+                        },
+                        value: {
+                          type: ['string', 'number', 'boolean'],
+                          description: 'Value to fill or select',
+                        },
+                        text: {
+                          type: 'string',
+                          description: 'Alias for value',
+                        },
+                        clear: {
+                          type: 'boolean',
+                          description: 'Clear field before typing (default: true)',
+                        },
+                      },
+                      required: [],
                     },
                   },
-                  required: [],
-                },
-                description: 'Array of field descriptors to fill sequentially (for fill_form)',
+                ],
+                description:
+                  'Field descriptors or visible-label-to-value map to fill sequentially (for fill_form)',
+              },
+              formSelector: {
+                type: 'string',
+                description: 'Optional CSS selector limiting fill_form label matching to a form.',
               },
               text: { type: 'string', description: 'Text to type/fill' },
               value: { type: 'string', description: 'Alias for text' },
@@ -2209,6 +2237,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
                 description:
                   'Absolute epoch-ms deadline: sleep until this instant before executing this action (extension-side timer, no extra round-trip)',
               },
+              url: { type: 'string', description: 'URL or URL substring expected by waitForUrl.' },
               direction: {
                 type: 'string',
                 enum: ['up', 'down', 'left', 'right'],
@@ -2272,7 +2301,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
               timeoutMs: {
                 type: 'number',
                 description:
-                  'Async polling timeout in milliseconds for assertion settling (default: 300ms)',
+                  'Async polling timeout in milliseconds for assertions (default: 300ms) or waitForSelector/waitForUrl (default: 5000ms)',
               },
               abortOnFailure: {
                 type: 'boolean',
@@ -2281,7 +2310,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
               // For type: 'extract'
               property: {
                 type: 'string',
-                enum: ['text', 'value', 'attribute'],
+                enum: ['text', 'value', 'selectedValue', 'selectedText', 'attribute'],
                 description: 'Property to extract (default: "text")',
               },
               attributeName: {
@@ -2402,7 +2431,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         fit: {
           type: 'boolean',
           description:
-            'Content-only extraction: restrict to the main content region and strip nav/header/footer/aside/form noise before conversion (default: false)',
+            'Content-only extraction, on by default without selector; strips nav/header/footer/aside/form.',
         },
         selector: {
           type: 'string',
@@ -2412,7 +2441,12 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         maxLength: {
           type: 'number',
           description:
-            'Hard character budget for the returned markdown (default: 120000). Longer markdown is cut and a notice carrying the true original length is appended.',
+            'Hard character budget (default: 40000); truncated output reports original length.',
+        },
+        mode: {
+          type: 'string',
+          enum: ['full', 'outline'],
+          description: 'Outline returns headings and table shapes only.',
         },
         tabId: { type: 'number', description: 'Target tab ID (optional)' },
         windowId: { type: 'number', description: 'Target window ID (optional)' },
@@ -3492,6 +3526,64 @@ function alignSchemaDescriptions(schema: any): any {
   return copy;
 }
 
+const CORE_DESCRIPTION_FIELDS = new Set([
+  'url',
+  'ref',
+  'selector',
+  'targetIndex',
+  'tabId',
+  'windowId',
+  'limit',
+  'cursor',
+  'actions',
+  'action',
+  'query',
+  'category',
+  'browserId',
+  'format',
+  'coordinate',
+  'sessionId',
+  'timeoutMs',
+  'maxLength',
+  'text',
+  'value',
+  'direction',
+  'amount',
+]);
+
+function shortenSchemaDescriptions(schema: any, propertyName?: string, isTool = false): any {
+  if (!schema || typeof schema !== 'object') return schema;
+  if (Array.isArray(schema))
+    return schema.map((item) => shortenSchemaDescriptions(item, propertyName, isTool));
+  const copy: any = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (key === 'description' && typeof value === 'string') {
+      // Keep tool guidance and descriptions for the core locating/action fields.
+      if (!isTool && propertyName && !CORE_DESCRIPTION_FIELDS.has(propertyName)) continue;
+      const firstSentence = value.split(/(?<=[.!?])\s+/)[0].trim();
+      const maxLength = isTool ? 120 : 25;
+      copy[key] =
+        firstSentence.length <= maxLength
+          ? firstSentence
+          : `${firstSentence.slice(0, maxLength - 3).trimEnd()}...`;
+    } else if (typeof value === 'object' && value !== null) {
+      if (key === 'properties') {
+        copy[key] = Object.fromEntries(
+          Object.entries(value).map(([name, property]) => [
+            name,
+            shortenSchemaDescriptions(property, name, false),
+          ]),
+        );
+      } else {
+        copy[key] = shortenSchemaDescriptions(value, propertyName, isTool);
+      }
+    } else {
+      copy[key] = value;
+    }
+  }
+  return copy;
+}
+
 export const PURGED_TOOL_NAMES = new Set([
   'chrome_click_element',
   'chrome_burst_interact',
@@ -3502,4 +3594,23 @@ export const PURGED_TOOL_NAMES = new Set([
 
 export const TOOL_SCHEMAS: Tool[] = RAW_TOOL_SCHEMAS.filter(
   (tool) => !PURGED_TOOL_NAMES.has(tool.name),
-).map((tool) => alignSchemaDescriptions(tool));
+).map((tool) => {
+  const aligned = shortenSchemaDescriptions(alignSchemaDescriptions(tool), undefined, true);
+  if (aligned.name === 'chrome_extract') {
+    aligned.description =
+      'Extract schema fields with sourceRefs; absent fields are missing, never invented.';
+  }
+  if (aligned.name === 'chrome_read_dom') {
+    aligned.inputSchema.properties.deltaOnly.description =
+      'default: true; unchanged reads return a compact marker.';
+  }
+  aligned.inputSchema.properties = {
+    ...aligned.inputSchema.properties,
+    browserId: {
+      type: 'string',
+      enum: ['chrome', 'edge'],
+      description: 'Browser (default chrome).',
+    },
+  };
+  return aligned;
+});

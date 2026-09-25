@@ -3,6 +3,7 @@ import { Server } from './server';
 import { v4 as uuidv4 } from 'uuid';
 import { NativeMessageType } from 'chrome-mcp-shared';
 import { TIMEOUTS } from './constant';
+import { BROWSER_IDENTITY } from './browser-identity';
 import fileHandler from './file-handler';
 import { getBridgeToken } from './server/token';
 import { choice } from '@typesafe-ai/sdk';
@@ -180,7 +181,7 @@ export class NativeMessagingHost {
     try {
       switch (message.type) {
         case NativeMessageType.START:
-          await this.startServer(message.payload?.port || 12306);
+          await this.startServer(BROWSER_IDENTITY.port);
           break;
         case NativeMessageType.STOP:
           await this.stopServer();
@@ -202,7 +203,8 @@ export class NativeMessagingHost {
             responseToRequestId: message.requestId,
             payload: {
               isRunning: this.associatedServer?.isRunning ?? false,
-              port: (this.associatedServer as any)?.port || 12306,
+              port: this.associatedServer?.port ?? BROWSER_IDENTITY.port,
+              browserId: BROWSER_IDENTITY.browserId,
               token: getBridgeToken(),
             },
           });
@@ -427,7 +429,11 @@ export class NativeMessagingHost {
       if (this.associatedServer.isRunning) {
         this.sendMessage({
           type: NativeMessageType.SERVER_STARTED,
-          payload: { port, token: getBridgeToken() },
+          payload: {
+            port: this.associatedServer.port,
+            browserId: BROWSER_IDENTITY.browserId,
+            token: getBridgeToken(),
+          },
         });
         return;
       }
@@ -436,7 +442,11 @@ export class NativeMessagingHost {
 
       this.sendMessage({
         type: NativeMessageType.SERVER_STARTED,
-        payload: { port, token: getBridgeToken() },
+        payload: {
+          port: this.associatedServer.port,
+          browserId: BROWSER_IDENTITY.browserId,
+          token: getBridgeToken(),
+        },
       });
     } catch (error: any) {
       this.sendError(`Failed to start server: ${error.message}`);

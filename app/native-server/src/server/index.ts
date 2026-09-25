@@ -25,6 +25,7 @@ import { randomUUID } from 'node:crypto';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { mcpSessionManager } from '../mcp/session-manager';
 import { NativeMessageType } from 'chrome-mcp-shared';
+import { BROWSER_IDENTITY } from '../browser-identity';
 
 import { resolveBridgeToken, getBridgeToken, isValidBridgeToken } from './token';
 export { resolveBridgeToken, getBridgeToken, isValidBridgeToken };
@@ -77,6 +78,7 @@ export { MediaAssetEntry, mediaAssetStore };
 export class Server {
   private fastify: FastifyInstance;
   public isRunning = false;
+  public port: number = BROWSER_IDENTITY.port;
   private nativeHost: NativeMessagingHost | null = null;
 
   constructor() {
@@ -206,6 +208,8 @@ export class Server {
       reply.status(HTTP_STATUS.OK).send({
         status: 'ok',
         message: 'pong',
+        browserId: BROWSER_IDENTITY.browserId,
+        port: this.port,
       });
     });
 
@@ -608,6 +612,7 @@ export class Server {
       const token = resolveBridgeToken();
 
       await this.fastify.listen({ port, host: SERVER_CONFIG.HOST });
+      this.port = port;
 
       // Set port environment variables after successful listen for Chrome MCP URL resolution
       process.env.CHROME_MCP_PORT = String(port);

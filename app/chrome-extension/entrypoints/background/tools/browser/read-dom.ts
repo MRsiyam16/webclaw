@@ -38,7 +38,7 @@ function foldCompactListLines(
   }
 
   const asFoldable = (el: IndexedElement): FoldableNode => ({
-    ref: `e${el.index}`,
+    ref: (el as IndexedElement & { ref?: string }).ref || `e${el.index}`,
     tag: el.role || el.tagName,
     text: el.text || '',
   });
@@ -49,7 +49,7 @@ function foldCompactListLines(
   let i = 0;
 
   while (i < lines.length) {
-    const headMatch = /^\[(\d+)\]/.exec(lines[i]);
+    const headMatch = /^\[(\d+)(?:\|e\d+)?\]/.exec(lines[i]);
     const headEl = headMatch ? byIndex.get(Number(headMatch[1])) : undefined;
     if (!headEl || !isFoldableRow(asFoldable(headEl))) {
       out.push(lines[i]);
@@ -61,7 +61,7 @@ function foldCompactListLines(
     const run: { node: FoldableNode; lineIndex: number }[] = [];
     let j = i;
     while (j < lines.length) {
-      const m = /^\[(\d+)\]/.exec(lines[j]);
+      const m = /^\[(\d+)(?:\|e\d+)?\]/.exec(lines[j]);
       const el = m ? byIndex.get(Number(m[1])) : undefined;
       if (!el) break;
       const node = asFoldable(el);
@@ -109,6 +109,7 @@ export interface ReadDOMParams {
   sessionContext?: string;
   cursor?: number;
   limit?: number;
+  includeAssets?: boolean;
   /**
    * Diff-only reads (default: true). A repeat read that sees a changed DOM
    * returns only the changed/added/removed diff plus the baseline snapshotId.
@@ -174,6 +175,26 @@ export interface ReadDOMParams {
 
 export class ReadDOMTool extends BaseBrowserToolExecutor {
   name = TOOL_NAMES.BROWSER.READ_DOM;
+  private hintedTabs = new Set<number>();
+
+  private requestShape(args: ReadDOMParams): string {
+    return JSON.stringify({
+      cursor: typeof args.cursor === 'number' ? Math.max(0, args.cursor) : 0,
+      limit: typeof args.limit === 'number' && args.limit > 0 ? args.limit : 40,
+      format: args.format ?? 'compact',
+      maxTextLength: args.maxTextLength ?? null,
+      activeViewportOnly: args.activeViewportOnly ?? false,
+      includeAssets: args.includeAssets ?? false,
+      includeDetails: args.includeDetails ?? false,
+      selector: args.scope || args.selector || null,
+      exclude: args.exclude ?? null,
+      viewportOnly: args.viewportOnly ?? false,
+      viewportThreshold: args.viewportThreshold ?? 1000,
+      isolateModal: args.isolateModal ?? false,
+      virtualizeViewport: args.virtualizeViewport ?? false,
+      flattenCards: args.flattenCards ?? true,
+    });
+  }
 
   async execute(args: ReadDOMParams = {}): Promise<ToolResult> {
     try {
@@ -519,7 +540,7 @@ export class ReadDOMTool extends BaseBrowserToolExecutor {
       if (subframeLines.length > 0) {
         mergedData.treeString += '\n' + subframeLines.join('\n');
       }
-      if (mergedData.assets && mergedData.assets.length > 0) {
+      if (args.includeAssets && mergedData.assets && mergedData.assets.length > 0) {
         const assetLines = mergedData.assets
           .map(
             (a) =>
@@ -529,20 +550,32 @@ export class ReadDOMTool extends BaseBrowserToolExecutor {
         mergedData.treeString += `\n[Visual Assets: ${mergedData.assets.length} found. Pass assetIndex to ${resolveToolName('screenshot')} to view one.]\n${assetLines}`;
       }
 
+      const activeScope = args.scope || args.selector;
+      if (activeScope) {
+        mergedData.treeString = `[Index scope: selector ${JSON.stringify(activeScope)} — refs are page-stable, indices are not]\n${mergedData.treeString}`;
+      }
+
       // Delta DOM support (now the default): a repeat read that sees a changed
       // DOM returns only the changed/added/removed diff. The first read on a page
       // has no baseline, so it returns the full tree and seeds the diff.
       // `deltaOnly: false` is the escape hatch and always returns the full tree.
       if (args.deltaOnly !== false && tab.id) {
+        const requestShape = this.requestShape(args);
+        const cacheKey = `${tab.id}:${requestShape}`;
         const diff = snapshotCacheManager.diffWithPrevious(
           tab.id,
           mergedData.indexedElements || [],
+          { cacheKey },
         );
-        const deltaSnapshot = snapshotCacheManager.setSnapshot(tab.id, {
-          url: scrubUrl(tab.url || ''),
-          elementCount: mergedData.elementCount,
-          elements: mergedData.indexedElements,
-        });
+        const deltaSnapshot = snapshotCacheManager.setSnapshot(
+          tab.id,
+          {
+            url: scrubUrl(tab.url || ''),
+            elementCount: mergedData.elementCount,
+            elements: mergedData.indexedElements,
+          },
+          cacheKey,
+        );
 
         // Unchanged: the whole point of the default delta path is that a
         // no-change re-read costs almost nothing, so it returns the compact
@@ -610,49 +643,65 @@ export class ReadDOMTool extends BaseBrowserToolExecutor {
         }
       }
 
-      // Compact list folding: only the compact format folds, and only for
-      // list-item rows that were indexed. Done before pagination so the cursor
-      // and totalElements reflect the folded payload.
-      if ((args.format ?? 'compact') === 'compact') {
-        mergedData.treeString = foldCompactListLines(
-          mergedData.treeString,
-          mergedData.indexedElements,
-        );
-      }
-
       // Record snapshot in cache manager (P1-6)
-      const snapshot = snapshotCacheManager.setSnapshot(tab.id, {
-        url: scrubUrl(tab.url || ''),
-        elementCount: mergedData.elementCount,
-        elements: mergedData.indexedElements,
-      });
+      const snapshot = snapshotCacheManager.setSnapshot(
+        tab.id,
+        {
+          url: scrubUrl(tab.url || ''),
+          elementCount: mergedData.elementCount,
+          elements: mergedData.indexedElements,
+        },
+        `${tab.id}:${this.requestShape(args)}`,
+      );
 
       // Pagination cursor support (P1-6)
-      // Pagination slices the pruned tree lines, which are the primary payload.
-      // It previously sliced only indexedElements, so a paginated read still
-      // shipped the whole tree and saved almost nothing on large pages.
+      // Pagination offsets and limits count indexed elements. Keep unindexed
+      // context (frame and asset annotations) on each page, and select element
+      // lines by their stable numeric index rather than their line position.
       const allTreeLines = mergedData.treeString ? mergedData.treeString.split('\n') : [];
-      const totalElements = allTreeLines.length;
+      const allElements = mergedData.indexedElements || [];
+      const totalElements = allElements.length;
       const cursor = typeof args.cursor === 'number' ? Math.max(0, args.cursor) : 0;
-      const limit = typeof args.limit === 'number' && args.limit > 0 ? args.limit : undefined;
+      const limit = typeof args.limit === 'number' && args.limit > 0 ? args.limit : 40;
 
       let treeString = mergedData.treeString;
-      let returnElements = mergedData.indexedElements || [];
+      let returnElements = allElements;
       let hasMore = false;
       let nextCursor: number | undefined = undefined;
 
       if (limit !== undefined) {
         const end = Math.min(cursor + limit, totalElements);
-        treeString = allTreeLines.slice(cursor, end).join('\n');
-        returnElements = returnElements.slice(cursor, end);
+        returnElements = allElements.slice(cursor, end);
+        const pageIndices = new Set(returnElements.map((element) => element.index));
+        const indexedLine = /^\[(\d+)(?:\|e\d+)?\]/;
+        treeString = allTreeLines
+          .filter((line) => {
+            const match = indexedLine.exec(line);
+            return !match || pageIndices.has(Number(match[1]));
+          })
+          .join('\n');
         hasMore = end < totalElements;
         nextCursor = hasMore ? end : undefined;
+      }
+
+      // Fold only after selecting this page, so every folded marker contains
+      // refs from this page and the page's element lines remain gap-free.
+      if ((args.format ?? 'compact') === 'compact') {
+        treeString = foldCompactListLines(treeString || '', returnElements);
+      }
+      if (hasMore) {
+        treeString += `\n… ${totalElements - (nextCursor ?? totalElements)} more elements (cursor: ${nextCursor})`;
       }
 
       const resultPayload: Record<string, any> = {
         ...mergedData,
         treeString,
         indexedElements: returnElements,
+        indexMap: Object.fromEntries(
+          returnElements
+            .filter((element) => mergedData.indexMap[element.index])
+            .map((element) => [element.index, mergedData.indexMap[element.index]]),
+        ),
         snapshotId: snapshot.snapshotId,
         tabUrl: scrubUrl(tab.url || ''),
         tabTitle: tab.title,
@@ -688,8 +737,14 @@ export class ReadDOMTool extends BaseBrowserToolExecutor {
         ...(args.exclude !== undefined ? { exclude: args.exclude } : {}),
         ...(mergedData.modalIsolated ? { modalIsolated: true } : {}),
         ...(mergedData.isConfirmationTrap ? { isConfirmationTrap: true } : {}),
-        pipelineHint: `1-Turn Optimal Paradigm: Pipeline fill + submit in 1 turn via ${resolveToolName('batch_actions')}([{type: "fill", index: ..., text: "..."\x7d, {type: "click", index: ...\x7d]) or ${resolveToolName('fill_index')}({ index, text, pressEnter: true \x7d). Avoid splitting fill and submit into separate LLM turns.`,
+        ...(!this.hintedTabs.has(tab.id)
+          ? {
+              pipelineHint: `1-Turn Optimal Paradigm: Pipeline fill + submit in 1 turn via ${resolveToolName('batch_actions')}([{type: "fill", index: ..., text: "..."\x7d, {type: "click", index: ...\x7d]) or ${resolveToolName('fill_index')}({ index, text, pressEnter: true \x7d). Avoid splitting fill and submit into separate LLM turns.`,
+            }
+          : {}),
       };
+      this.hintedTabs.add(tab.id);
+      if (!args.includeAssets) delete resultPayload.assets;
 
       // Default response is the pruned tree plus counters only. The detail
       // blocks (indexedElements / indexMap) have no in-extension consumer —

@@ -95,4 +95,48 @@ describe('Batch Actions Assert & Extract Pipeline', () => {
     expect(parsed.extractedData?.confirmedOrder).toBe('Order #999');
     expect(parsed.assertions?.[0].passed).toBe(true);
   });
+
+  it('polls text assertions and reads descendant text when the element value is empty', async () => {
+    (batchActionsTool as any).resolveAffinityTab = vi.fn().mockResolvedValue({
+      id: 1,
+      url: 'https://example.com/app',
+    });
+    (globalThis as any).chrome = {
+      tabs: {
+        get: vi.fn().mockResolvedValue({ id: 1, url: 'https://example.com/app' }),
+      },
+    };
+    const safeExecuteScript = vi
+      .fn()
+      .mockResolvedValueOnce([{ result: { found: true, visible: true, text: '', value: '' } }])
+      .mockResolvedValueOnce([
+        {
+          result: {
+            found: true,
+            visible: true,
+            text: 'Pera Nai Chill',
+            value: '',
+          },
+        },
+      ]);
+    (batchActionsTool as any).safeExecuteScript = safeExecuteScript;
+
+    const res = await batchActionsTool.execute({
+      tabId: 1,
+      actions: [
+        {
+          type: 'assert',
+          selector: 'a#video-title',
+          expectedText: 'Pera Nai Chill',
+          condition: 'contains',
+          timeoutMs: 100,
+        },
+      ],
+    });
+
+    const parsed = JSON.parse(res.content[0].text);
+    expect(parsed.assertions?.[0].passed).toBe(true);
+    expect(parsed.results[0].output.actualText).toBe('Pera Nai Chill');
+    expect(safeExecuteScript).toHaveBeenCalledTimes(2);
+  });
 });

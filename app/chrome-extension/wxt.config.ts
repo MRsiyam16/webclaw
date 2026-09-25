@@ -16,6 +16,7 @@ const IS_DEV = process.env.NODE_ENV !== 'production' && process.env.MODE !== 'pr
 
 // See https://wxt.dev/api/config.html
 export default defineConfig({
+  outDir: process.env.WXT_OUT_DIR || '.output',
   modules: ['@wxt-dev/module-vue'],
   runner: {
     // 方案1: 禁用自动启动（推荐）

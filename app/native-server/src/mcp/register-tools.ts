@@ -29,6 +29,8 @@ import { mediaAssetStore } from '../media-asset-store';
 import { getChromeMcpPort, SERVER_CONFIG } from '../constant';
 import { FastDecisionEngine } from '../jev';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import { BROWSER_IDENTITY } from '../browser-identity';
+import { traceToolCall } from './tool-trace';
 
 export async function prepareMediaArgsIfNeeded(name: string, args: any): Promise<void> {
   if (name !== 'chrome_insert_media' || !args) return;
@@ -140,6 +142,17 @@ const handleToolCallInner = async (
   sessionId?: string,
   server?: Server,
 ): Promise<CallToolResult> => {
+  if (args?.browserId !== undefined && args.browserId !== BROWSER_IDENTITY.browserId) {
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Browser isolation refusal: this server serves "${BROWSER_IDENTITY.browserId}"; requested "${String(args.browserId)}".`,
+        },
+      ],
+      isError: true,
+    };
+  }
   try {
     const effectiveSessionId = sessionId || 'default';
     const normalized = normalizeIncomingToolName(name);
@@ -303,7 +316,9 @@ export const handleToolCall = async (
   const noticePromise = shouldCheckUpdate
     ? agentUpdateNotifier.maybeGetFirstCallNotice().catch(() => null)
     : Promise.resolve(null);
-  const result = await handleToolCallInner(name, args, sessionId, server);
+  const result = await traceToolCall(name, () =>
+    handleToolCallInner(name, args, sessionId, server),
+  );
   try {
     const notice = await noticePromise;
     if (notice && result && Array.isArray(result.content)) {

@@ -33,6 +33,19 @@ const SCREENSHOT_CONSTANTS = {
   readonly SCRIPT_INIT_DELAY: number;
 };
 
+/** Output dimensions for a viewport-only capture, capped at 800 CSS pixels wide. */
+export function viewportCaptureSize(
+  width: number,
+  height: number,
+  maxWidth = 800,
+): { width: number; height: number } {
+  const scale = Math.min(1, Math.max(1, maxWidth) / Math.max(1, width));
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+}
+
 // Adjust CAPTURE_STITCH_DELAY_MS to respect Chrome's capture rate if available in runtime
 // Some TS typings don't expose MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND; use a safe cast with a sane fallback.
 const __MAX_CAP_RATE: number | undefined = (chrome.tabs as any)
@@ -1072,15 +1085,16 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
             }
             const rawDataUrl = `data:${shot.mimeType || targetMimeType};base64,${base64Data}`;
             // Enforce DPR 1:1 normalization via OffscreenCanvas
+            const outputSize = viewportCaptureSize(clientWidth, clientHeight, args.width ?? 800);
             finalImageDataUrl = await normalizeImageToCssDimensions(
               rawDataUrl,
-              clientWidth,
-              clientHeight,
+              outputSize.width,
+              outputSize.height,
               targetMimeType,
               qualityFraction,
             );
-            finalImageWidthCss = clientWidth;
-            finalImageHeightCss = clientHeight;
+            finalImageWidthCss = outputSize.width;
+            finalImageHeightCss = outputSize.height;
             if (await hasBlackBars(finalImageDataUrl)) {
               // Window-transition frame: wait two more presented frames and
               // retry exactly once before accepting the capture.
@@ -1111,10 +1125,15 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
               );
               const retryData = typeof retry?.data === 'string' ? retry.data : '';
               if (retryData) {
-                finalImageDataUrl = await normalizeImageToCssDimensions(
-                  `data:${retry.mimeType || targetMimeType};base64,${retryData}`,
+                const outputSize = viewportCaptureSize(
                   clientWidth,
                   clientHeight,
+                  args.width ?? 800,
+                );
+                finalImageDataUrl = await normalizeImageToCssDimensions(
+                  `data:${retry.mimeType || targetMimeType};base64,${retryData}`,
+                  outputSize.width,
+                  outputSize.height,
                   targetMimeType,
                   qualityFraction,
                 );
@@ -1178,15 +1197,20 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
           const rawVisibleDataUrl = await this.captureTabPngWithRetry(tab);
           if (!rawVisibleDataUrl) throw new Error('captureVisibleTab returned empty image');
           // Enforce DPR 1:1 Normalization: resample from physical pixels to exact CSS viewport dimensions
-          finalImageDataUrl = await normalizeImageToCssDimensions(
-            rawVisibleDataUrl,
+          const outputSize = viewportCaptureSize(
             pageDetails.viewportWidth,
             pageDetails.viewportHeight,
+            args.width ?? 800,
+          );
+          finalImageDataUrl = await normalizeImageToCssDimensions(
+            rawVisibleDataUrl,
+            outputSize.width,
+            outputSize.height,
             targetMimeType,
             qualityFraction,
           );
-          finalImageWidthCss = pageDetails.viewportWidth;
-          finalImageHeightCss = pageDetails.viewportHeight;
+          finalImageWidthCss = outputSize.width;
+          finalImageHeightCss = outputSize.height;
         }
       }
 

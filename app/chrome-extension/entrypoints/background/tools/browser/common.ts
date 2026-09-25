@@ -49,15 +49,73 @@ export function hasIpOrCustomPort(urlStr: string): boolean {
  */
 class NavigateTool extends BaseBrowserToolExecutor {
   name = TOOL_NAMES.BROWSER.NAVIGATE;
-
   private async navigateAndWait(
     tabId: number,
     action: () => Promise<any>,
     timeoutMs = 15000,
-  ): Promise<void> {
+  ): Promise<{
+    statusCode?: number;
+    statusUrl?: string;
+    navigationError?: string;
+    download?: { filename: string; path?: string; id: number };
+  }> {
+    const outcome: {
+      statusCode?: number;
+      statusUrl?: string;
+      navigationError?: string;
+      download?: { filename: string; path?: string; id: number };
+    } = {};
+    const webNav = typeof chrome !== 'undefined' ? chrome.webNavigation : undefined;
+    const webReq = typeof chrome !== 'undefined' ? chrome.webRequest : undefined;
+    const downloads = typeof chrome !== 'undefined' ? chrome.downloads : undefined;
+    const onDownload = (item: chrome.downloads.DownloadItem) => {
+      if (item.tabId === tabId && item.id !== undefined) {
+        outcome.download = {
+          filename: item.filename.split(/[\\/]/).pop() || item.filename,
+          path: item.filename || undefined,
+          id: item.id,
+        };
+      }
+    };
+    const onHeaders = (details: chrome.webRequest.WebResponseHeadersDetails) => {
+      if (details.tabId === tabId && details.type === 'main_frame') {
+        outcome.statusCode = details.statusCode;
+        outcome.statusUrl = details.url;
+      }
+    };
+    const onError = (details: any) => {
+      if (details.tabId === tabId && details.frameId === 0) outcome.navigationError = details.error;
+    };
+    try {
+      webReq?.onHeadersReceived?.addListener(onHeaders, {
+        urls: ['<all_urls>'],
+        types: ['main_frame'],
+      });
+    } catch {}
+    try {
+      webNav?.onErrorOccurred?.addListener(onError);
+    } catch {}
+    try {
+      downloads?.onCreated?.addListener(onDownload);
+    } catch {}
+    const removeWebNavListeners = () => {
+      try {
+        webReq?.onHeadersReceived?.removeListener(onHeaders);
+      } catch {}
+      try {
+        webNav?.onErrorOccurred?.removeListener(onError);
+      } catch {}
+      try {
+        downloads?.onCreated?.removeListener(onDownload);
+      } catch {}
+    };
     if (typeof chrome === 'undefined' || !chrome.tabs?.onUpdated?.addListener) {
-      await action();
-      return;
+      try {
+        await action();
+      } finally {
+        removeWebNavListeners();
+      }
+      return outcome;
     }
 
     let cleanup: (() => void) | undefined;
@@ -88,10 +146,24 @@ class NavigateTool extends BaseBrowserToolExecutor {
       }
     } finally {
       if (cleanup) cleanup();
+      if (outcome.navigationError?.includes('ERR_ABORTED') && !outcome.download) {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      }
+      removeWebNavListeners();
     }
 
     await waitForPageSettle(tabId, { timeoutMs: 1500, quietPeriodMs: 100 }).catch(() => {});
+    if (outcome.download && downloads?.search) {
+      try {
+        const [item] = await downloads.search({ id: outcome.download.id });
+        if (item?.filename) {
+          outcome.download.path = item.filename;
+          outcome.download.filename = item.filename.split(/[\\/]/).pop() || item.filename;
+        }
+      } catch {}
+    }
     void tabFaviconManager.markTabActive(tabId);
+    return outcome;
   }
 
   private async waitForTabNavigationComplete(tabId: number, timeoutMs = 15000): Promise<void> {
@@ -474,8 +546,14 @@ class NavigateTool extends BaseBrowserToolExecutor {
           `URL already open in Tab ID: ${existingTab.id}, Window ID: ${existingTab.windowId}`,
         );
         // Update URL when explicit tab specified or when existingTab URL differs from requested url
+        let navigation: {
+          statusCode?: number;
+          statusUrl?: string;
+          navigationError?: string;
+          download?: { filename: string; path?: string; id: number };
+        } = {};
         if (typeof existingTab.id === 'number' && (explicitTab || existingTab.url !== url)) {
-          await this.navigateAndWait(existingTab.id, () =>
+          navigation = await this.navigateAndWait(existingTab.id, () =>
             chrome.tabs.update(existingTab.id!, { url }),
           );
         }
@@ -518,21 +596,32 @@ class NavigateTool extends BaseBrowserToolExecutor {
         console.log(`Activated existing Tab ID: ${existingTab.id}`);
         // Get updated tab information and return it
         const updatedTab = await chrome.tabs.get(existingTab.id);
+        const landingUrl = updatedTab.url || (updatedTab as any).pendingUrl || url;
+        // webNavigation completion and tabs.status do not include HTTP status.
+        const statusCode = navigation.statusCode;
+        const failed =
+          !navigation.download &&
+          Boolean(navigation.navigationError || (statusCode !== undefined && statusCode >= 400));
 
         return {
           content: [
             {
               type: 'text',
               text: JSON.stringify({
-                success: true,
+                success: !failed,
                 message: 'Activated existing tab',
                 tabId: updatedTab.id,
                 windowId: updatedTab.windowId,
-                url: updatedTab.url || (updatedTab as any).pendingUrl || url,
+                url: landingUrl,
+                ...(statusCode !== undefined ? { statusCode } : {}),
+                ...(!navigation.download && navigation.navigationError
+                  ? { navigationError: navigation.navigationError }
+                  : {}),
+                ...(navigation.download ? { download: navigation.download } : {}),
               }),
             },
           ],
-          isError: false,
+          isError: failed,
         };
       }
 

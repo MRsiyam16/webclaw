@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Webclaw synthetic benchmark</title>
+  <main>
+    <h1>Deterministic synthetic benchmark</h1>
+    <nav
+      ><a id="page-one" href="?page=1">Page one</a>
+      <a id="page-two" href="?page=2">Page two</a></nav
+    >
+    <section id="records-region" aria-label="Synthetic records">
+      <h2>Records</h2>
+      <table id="records"
+        ><thead
+          ><tr><th>ID</th><th>Name</th><th>Region</th><th>Score</th><th>Status</th></tr></thead
+        ><tbody></tbody
+      ></table>
+    </section>
+    <section id="form-region" aria-label="Synthetic form">
+      <h2>Form</h2
+      ><form id="synthetic-form"
+        ><label for="note">Note</label><input id="note" name="note" /><button type="submit"
+          >Submit</button
+        ></form
+      >
+      <output id="form-result" aria-live="polite"></output>
+    </section>
+    <section id="missing-region" aria-label="Missing field case"
+      ><span id="known-field" data-field="known">present</span></section
+    >
+  </main>
+  <script>
+    const page = new URL(location.href).searchParams.get('page') === '2' ? 2 : 1;
+    const tbody = document.querySelector('#records tbody');
+    for (let i = 0; i < 20; i++) {
+      const id = (page - 1) * 20 + i + 1;
+      const tr = document.createElement('tr');
+      for (const [key, value] of Object.entries({
+        id: `R${String(id).padStart(3, '0')}`,
+        name: `Synthetic ${String(id).padStart(2, '0')}`,
+        region: ['north', 'south', 'east', 'west'][i % 4],
+        score: String(1000 + id),
+        status: id % 2 ? 'active' : 'queued',
+      })) {
+        const td = document.createElement('td');
+        td.dataset.field = key;
+        td.textContent = value;
+        tr.append(td);
+      }
+      tbody.append(tr);
+    }
+    document.querySelector('#synthetic-form').addEventListener('submit', (event) => {
+      event.preventDefault();
+      const submitted = document.querySelector('#note').value;
+      setTimeout(() => {
+        document.querySelector('#form-result').textContent = `accepted:${submitted}`;
+      }, 350);
+    });
+  </script>
+</html>

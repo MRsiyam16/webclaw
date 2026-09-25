@@ -33,9 +33,8 @@ async function readDom(
 ): Promise<ReadResult> {
   const mod = await import('../entrypoints/background/tools/browser/read-dom');
   const engine = await import('../entrypoints/background/tools/browser/in-page-engine');
-  const { renderCompactElementLine } = await import(
-    '../entrypoints/background/tools/browser/dom-indexer'
-  );
+  const { renderCompactElementLine } =
+    await import('../entrypoints/background/tools/browser/dom-indexer');
 
   const spy = vi.spyOn(engine, 'executeInPage');
   spy.mockResolvedValue([
@@ -59,7 +58,7 @@ async function readDom(
     title: 'List',
   });
 
-  const res = await mod.readDOMTool.execute({ deltaOnly: false } as any);
+  const res = await mod.readDOMTool.execute({ deltaOnly: false, limit: 100 } as any);
   spy.mockRestore();
   return JSON.parse(res.content[0].text as string) as ReadResult;
 }
@@ -115,7 +114,9 @@ describe('read_dom compact list folding', () => {
   });
 
   it('coexists with the pre-existing virtualization marker (which passes through)', async () => {
-    const elements = Array.from({ length: 4 }, (_, i) => listRow(i + 1, `Product ${i + 1} - in stock`));
+    const elements = Array.from({ length: 4 }, (_, i) =>
+      listRow(i + 1, `Product ${i + 1} - in stock`),
+    );
     const virtual =
       '~ [virtualized: 20 similar offscreen items in <li> folded (scroll down or use selector to reveal)]';
     const payload = await readDom(990_104, elements, [virtual]);

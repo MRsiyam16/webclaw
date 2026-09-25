@@ -212,12 +212,17 @@ export async function performPhysicalFill(
   }
 
   // 2. Special widget handling (select, custom combobox/listbox, color, date, range, time, checkbox, radio, file)
+  const isEditableComboboxInput =
+    coords?.tagName?.toLowerCase() === 'input' &&
+    !Object.prototype.hasOwnProperty.call(coords?.attributes ?? {}, 'readonly') &&
+    coords?.attributes?.['aria-readonly'] !== 'true';
   const isCustomCombobox =
-    coords?.role === 'combobox' ||
-    coords?.role === 'listbox' ||
-    coords?.attributes?.role === 'combobox' ||
-    coords?.attributes?.role === 'listbox' ||
-    coords?.attributes?.['aria-haspopup'] === 'listbox';
+    !isEditableComboboxInput &&
+    (coords?.role === 'combobox' ||
+      coords?.role === 'listbox' ||
+      coords?.attributes?.role === 'combobox' ||
+      coords?.attributes?.role === 'listbox' ||
+      coords?.attributes?.['aria-haspopup'] === 'listbox');
 
   const isSpecialWidget =
     coords?.tagName === 'select' ||

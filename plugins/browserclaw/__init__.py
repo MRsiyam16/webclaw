@@ -60,10 +60,23 @@ _AUTH_HELP = (
 
 # Session state management
 _session_lock = threading.RLock()
+_browser_session_locks = {'chrome': threading.RLock(), 'edge': threading.RLock()}
 _active_session_id: Optional[str] = None
 _active_session_url: Optional[str] = None
 _invalid_configured_sessions: set[str] = set()
 _request_counter: int = 0
+_browser_sessions: Dict[str, Dict[str, Any]] = {'chrome': {}, 'edge': {}}
+_BROWSER_IDS = {'chrome', 'edge'}
+
+
+def _with_browser_id(schema: dict) -> dict:
+    schema = dict(schema)
+    schema['properties'] = dict(schema.get('properties') or {})
+    schema['properties']['browserId'] = {
+        'type': 'string', 'enum': ['chrome', 'edge'],
+        'description': 'Browser (default chrome).',
+    }
+    return schema
 
 
 def _next_request_id() -> int:
@@ -74,33 +87,47 @@ def _next_request_id() -> int:
         return _request_counter
 
 
-def _get_configured_session_id() -> Optional[str]:
-    """Check if a session ID is pre-configured via environment variable and not known to be invalid."""
-    for name in SESSION_ID_ENV_VARS:
+def _get_configured_session_id(browser_id: str = 'chrome') -> Optional[str]:
+    """Get this browser's configured session ID unless it has been invalidated."""
+    state = _browser_sessions[browser_id]
+    invalid = state.setdefault('invalid_sessions', set())
+    suffix = '_EDGE' if browser_id == 'edge' else ''
+    for name in (f'BROWSERCLAW_MCP_SESSION_ID{suffix}', f'CHROME_MCP_SESSION_ID{suffix}'):
         val = os.getenv(name, '').strip()
-        if val and val not in _invalid_configured_sessions:
+        if val and val not in invalid and (browser_id != 'chrome' or val not in _invalid_configured_sessions):
             return val
     return None
 
 
-def _get_active_session_id() -> Optional[str]:
-    """Retrieve active session id, if any."""
+def _get_active_session_id(browser_id: str = 'chrome') -> Optional[str]:
     with _session_lock:
-        return _active_session_id or _get_configured_session_id()
+        state = _browser_sessions[browser_id]
+        legacy = _active_session_id if browser_id == 'chrome' else None
+        return state.get('session_id', legacy) or _get_configured_session_id(browser_id)
 
 
-def _set_active_session_id(session_id: Optional[str], url: Optional[str] = None) -> None:
-    """Explicitly update active session id (used internally or by tests)."""
+def _set_active_session_id(session_id: Optional[str], url: Optional[str] = None, browser_id: str = 'chrome') -> None:
     global _active_session_id, _active_session_url
     with _session_lock:
-        _active_session_id = session_id
-        _active_session_url = url
+        _browser_sessions[browser_id].update(session_id=session_id, url=url)
+        if browser_id == 'chrome':
+            _active_session_id, _active_session_url = session_id, url
 
 
-def _reset_session(clear_invalid: bool = False) -> None:
-    """Invalidate currently cached session to trigger re-initialization on next call."""
+def _reset_session(clear_invalid: bool = False, browser_id: Optional[str] = None) -> None:
     global _active_session_id, _active_session_url
     with _session_lock:
+        identities = [browser_id] if browser_id else list(_BROWSER_IDS)
+        for identity in identities:
+            state = _browser_sessions[identity]
+            if clear_invalid:
+                state['invalid_sessions'] = set()
+            elif state.get('session_id'):
+                state.setdefault('invalid_sessions', set()).add(state['session_id'])
+            state.pop('session_id', None)
+            state.pop('url', None)
+        if browser_id not in (None, 'chrome'):
+            return
         if clear_invalid:
             _invalid_configured_sessions.clear()
         else:
@@ -114,13 +141,14 @@ def _reset_session(clear_invalid: bool = False) -> None:
         _active_session_url = None
 
 
-def _get_target_urls() -> List[str]:
-    """Return deduplicated list of target MCP endpoints."""
-    urls: List[str] = []
-    env_url = os.getenv('BROWSERCLAW_MCP_URL', '').strip()
-    if env_url:
-        urls.append(env_url)
-    port = _plugin_config.get('native_server_port') or 12306
+def _get_target_urls(browser_id: str = 'chrome') -> List[str]:
+    """Return only endpoints configured for this browser identity."""
+    if browser_id not in _BROWSER_IDS:
+        raise ValueError(f'Unknown browserId {browser_id!r}; expected chrome or edge')
+    names = ('BROWSERCLAW_EDGE_MCP_URL',) if browser_id == 'edge' else ('BROWSERCLAW_CHROME_MCP_URL', 'BROWSERCLAW_MCP_URL')
+    env_url = next((os.getenv(name, '').strip() for name in names if os.getenv(name, '').strip()), '')
+    urls = [env_url] if env_url else []
+    port = (_plugin_config.get('edge_server_port') or 12307) if browser_id == 'edge' else (_plugin_config.get('native_server_port') or 12306)
     default_url = f'http://127.0.0.1:{port}/mcp'
     if default_url not in urls:
         urls.append(default_url)
@@ -149,6 +177,31 @@ def _extract_result_or_error(raw: str) -> str:
     except Exception:
         pass
     return raw
+
+
+def _verify_endpoint_identity(url: str, token: Optional[str], browser_id: str) -> bool:
+    """Return True only when /ping proves this endpoint's browser identity."""
+    ping_url = url.rsplit('/', 1)[0] + '/ping'
+    headers = {'Accept': 'application/json'}
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+    req = urllib.request.Request(ping_url, headers=headers, method='GET')
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode('utf-8', errors='replace')
+    except Exception:
+        # Legacy/mock endpoints may only expose MCP; their identity was not proven.
+        return False
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f'Invalid /ping identity response from {ping_url}') from exc
+    reported = payload.get('browserId') if isinstance(payload, dict) else None
+    if reported is None and browser_id == 'chrome':
+        return False
+    if reported != browser_id:
+        raise RuntimeError(f'Browser endpoint identity mismatch: requested {browser_id}, got {reported!r}')
+    return True
 
 
 def _perform_handshake(url: str, token: Optional[str]) -> str:
@@ -277,34 +330,36 @@ def _perform_handshake(url: str, token: Optional[str]) -> str:
     return session_id
 
 
-def _ensure_session(url: str, force_refresh: bool = False) -> Optional[str]:
-    """Ensure an active MCP session exists for the target URL."""
-    configured = _get_configured_session_id()
+def _ensure_session(url: str, force_refresh: bool = False, browser_id: str = 'chrome') -> Optional[str]:
+    """Ensure this browser identity has an MCP session for the target URL."""
+    configured = _get_configured_session_id(browser_id)
     if configured and not force_refresh:
         return configured
 
-    global _active_session_id, _active_session_url
-    with _session_lock:
-        if not force_refresh and _active_session_id and _active_session_url == url:
-            return _active_session_id
+    state = _browser_sessions[browser_id]
+    with _browser_session_locks[browser_id]:
+        if not force_refresh and state.get('session_id') and state.get('url') == url:
+            return state['session_id']
+        session_id = _perform_handshake(url, _bridge_token(browser_id))
+        with _session_lock:
+            state.update(session_id=session_id or None, url=url)
+            if browser_id == 'chrome':
+                global _active_session_id, _active_session_url
+                _active_session_id, _active_session_url = session_id or None, url
+        return session_id or None
 
-        token = _bridge_token()
-        session_id = _perform_handshake(url, token)
-        _active_session_id = session_id or None
-        _active_session_url = url
-        return _active_session_id
 
-
-def _bridge_token() -> Optional[str]:
+def _bridge_token(browser_id: str = 'chrome') -> Optional[str]:
     """Resolve the native-bridge auth token, or None when nothing is configured.
 
     Read lazily on every call: the file is tiny and the native server may
     regenerate it between calls.
     """
-    cfg_token = _plugin_config.get('auth_token')
+    cfg_token = _plugin_config.get('edge_auth_token' if browser_id == 'edge' else 'auth_token')
     if cfg_token:
         return str(cfg_token).strip()
-    for name in BRIDGE_TOKEN_ENV_VARS:
+    env_names = (('BROWSERCLAW_EDGE_MCP_TOKEN',) if browser_id == 'edge' else BRIDGE_TOKEN_ENV_VARS)
+    for name in env_names:
         value = os.getenv(name, '').strip()
         if value:
             return value
@@ -343,122 +398,78 @@ def _align_response_tool_names(text: str) -> str:
 
 
 def _call_browserclaw(tool_name: str, arguments: dict) -> str:
-    if tool_name == 'browserclaw_read_dom' and isinstance(arguments, dict):
-        if 'isolateModal' not in arguments and _plugin_config.get('isolate_modal'):
-            arguments['isolateModal'] = True
-    remote_name = tool_name
-    if tool_name == 'browserclaw_get_windows_and_tabs':
-        remote_name = 'get_windows_and_tabs'
-    elif tool_name.startswith('browserclaw_'):
-        remote_name = 'chrome_' + tool_name[len('browserclaw_'):]
-
-    token = _bridge_token()
+    args = dict(arguments or {})
+    explicit_browser_id = 'browserId' in args
+    browser_id = args.get('browserId', 'chrome')
+    if browser_id not in _BROWSER_IDS:
+        return json.dumps({'error': f"Unknown browserId {browser_id!r}; expected chrome or edge"})
+    args['browserId'] = browser_id
+    if tool_name == 'browserclaw_read_dom' and 'isolateModal' not in args and _plugin_config.get('isolate_modal'):
+        args['isolateModal'] = True
+    remote_name = 'get_windows_and_tabs' if tool_name == 'browserclaw_get_windows_and_tabs' else (
+        'chrome_' + tool_name[len('browserclaw_'):] if tool_name.startswith('browserclaw_') else tool_name
+    )
     last_error = None
-    urls = _get_target_urls()
-
+    urls = _get_target_urls(browser_id)
+    port = (_plugin_config.get('edge_server_port') or 12307) if browser_id == 'edge' else (_plugin_config.get('native_server_port') or 12306)
+    token = _bridge_token(browser_id)
     for url in urls:
+        endpoint_verified = False
+        try:
+            if explicit_browser_id:
+                endpoint_verified = _verify_endpoint_identity(url, token, browser_id)
+        except Exception as exc:
+            last_error = str(exc)
+            continue
         for attempt in range(2):
             try:
-                session_id = _ensure_session(url, force_refresh=(attempt > 0))
-
-                req_id = _next_request_id()
-                payload = json.dumps({
-                    'jsonrpc': '2.0',
-                    'id': req_id,
-                    'method': 'tools/call',
-                    'params': {
-                        'name': remote_name,
-                        'arguments': arguments or {},
-                    },
-                }).encode('utf-8')
-
-                headers = {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json, text/event-stream',
-                    'mcp-protocol-version': MCP_PROTOCOL_VERSION,
-                }
-                if token:
-                    headers['Authorization'] = f'Bearer {token}'
-                if session_id:
-                    headers['mcp-session-id'] = session_id
-
-                req = urllib.request.Request(
-                    url,
-                    data=payload,
-                    headers=headers,
-                    method='POST',
-                )
-
+                session_id = _ensure_session(url, force_refresh=attempt > 0, browser_id=browser_id)
+                payload = json.dumps({'jsonrpc': '2.0', 'id': _next_request_id(), 'method': 'tools/call',
+                    'params': {'name': remote_name, 'arguments': args}}).encode('utf-8')
+                headers = {'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream',
+                           'mcp-protocol-version': MCP_PROTOCOL_VERSION}
+                if token: headers['Authorization'] = f'Bearer {token}'
+                if session_id: headers['mcp-session-id'] = session_id
+                req = urllib.request.Request(url, data=payload, headers=headers, method='POST')
                 with urllib.request.urlopen(req, timeout=45) as resp:
-                    raw = resp.read().decode('utf-8', errors='replace')
-                    res_str = _extract_result_or_error(raw)
-                    try:
-                        res_obj = json.loads(res_str)
-                        if isinstance(res_obj, dict) and 'error' in res_obj:
-                            err_msg = str(res_obj.get('error', '')).lower()
-                            if ('session' in err_msg or 'not initialized' in err_msg) and attempt == 0:
-                                logger.info(
-                                    'BrowserClaw MCP session invalid in payload (%s). Re-initializing...',
-                                    err_msg,
-                                )
-                                _reset_session()
+                    res_str = _extract_result_or_error(resp.read().decode('utf-8', errors='replace'))
+                    result = json.loads(res_str)
+                    if isinstance(result, dict):
+                        reported_identity = result.get('browserId')
+                        if reported_identity is not None and reported_identity != browser_id:
+                            return json.dumps({'error': f"Browser endpoint identity mismatch: requested {browser_id}, got {reported_identity!r}"}, ensure_ascii=False)
+                        if reported_identity is None and explicit_browser_id and not (
+                            endpoint_verified and isinstance(result.get('content'), list)
+                        ):
+                            return json.dumps({'error': f"Browser endpoint identity missing: requested {browser_id}"}, ensure_ascii=False)
+                        if reported_identity is None:
+                            # MCP CallToolResult usually contains only content/isError;
+                            # the matching /ping proved which browser served this request.
+                            result['browserId'] = browser_id
+                        if 'error' in result:
+                            emsg = str(result['error']).lower()
+                            if attempt == 0 and ('session' in emsg or 'not initialized' in emsg):
+                                _reset_session(browser_id=browser_id)
                                 continue
-                    except Exception:
-                        pass
+                        return _align_response_tool_names(json.dumps(result, ensure_ascii=False))
                     return _align_response_tool_names(res_str)
-
-            except RuntimeError as e:
+            except RuntimeError as exc:
                 if attempt == 0:
-                    logger.info('BrowserClaw handshake error (%s). Retrying...', e)
-                    _reset_session()
+                    _reset_session(browser_id=browser_id)
                     continue
-                return json.dumps({'error': str(e)}, ensure_ascii=False)
-
-            except urllib.error.HTTPError as e:
-                if e.code == 401:
+                return json.dumps({'error': str(exc)}, ensure_ascii=False)
+            except urllib.error.HTTPError as exc:
+                if exc.code == 401:
                     return json.dumps({'error': _AUTH_HELP})
-
-                err_body = ''
-                try:
-                    err_body = e.read().decode('utf-8', errors='replace').strip()
-                except Exception:
-                    pass
-
-                # Session expired or invalid session header (HTTP 400 or 404)
-                if e.code in (400, 404) and attempt == 0:
-                    logger.info(
-                        'BrowserClaw MCP session invalid or expired (HTTP %d). Re-initializing session...',
-                        e.code,
-                    )
-                    _reset_session()
+                body = exc.read().decode('utf-8', errors='replace').strip()
+                if exc.code in (400, 404) and attempt == 0:
+                    _reset_session(browser_id=browser_id)
                     continue
-
-                if err_body:
-                    try:
-                        err_parsed = json.loads(err_body)
-                        if isinstance(err_parsed, dict):
-                            msg = err_parsed.get('error') or err_parsed.get('message')
-                            hint = err_parsed.get('hint')
-                            if hint and msg:
-                                return json.dumps({'error': f'{msg} ({hint})'}, ensure_ascii=False)
-                            return json.dumps(err_parsed, ensure_ascii=False)
-                    except Exception:
-                        pass
-                    return json.dumps({'error': f'BrowserClaw HTTP {e.code}: {err_body}'}, ensure_ascii=False)
-
-                last_error = f'HTTP {e.code}'
+                return json.dumps({'error': body or f'BrowserClaw HTTP {exc.code}'}, ensure_ascii=False)
+            except Exception as exc:
+                last_error = str(exc)
                 break
-            except urllib.error.URLError as e:
-                last_error = str(e)
-                break
-            except Exception as e:
-                last_error = str(e)
-                break
-
-    port = _plugin_config.get('native_server_port') or 12306
-    return json.dumps({
-        'error': f'BrowserClaw server not reachable ({last_error}). Ensure Chrome extension is loaded and native server is running on http://127.0.0.1:{port}/mcp.',
-    })
+    return json.dumps({'error': f'BrowserClaw {browser_id} endpoint unavailable at http://127.0.0.1:{port}/mcp ({last_error}); no other browser was contacted.'}, ensure_ascii=False)
 
 def _register_bundled_skill(ctx: Any) -> None:
     skill_md = Path(__file__).resolve().parent / 'skills' / 'browserclaw' / 'SKILL.md'
@@ -547,7 +558,7 @@ TOOL_DEFINITIONS = {
         }
     },
     "browserclaw_screenshot": {
-        "description": "[Prefer browserclaw_read_dom over taking a screenshot] Take a screenshot of the current page or a specific element. Returns base64 image directly in MCP image content block without writing to disk. By default, output is compressed JPEG with maxWidth <= 1280px. Debug disk save is available via savePng/saveToDisk into system temporary directory.",
+        "description": "[Prefer browserclaw_read_dom over taking a screenshot] Capture the current page or an element for visual evidence or QA. Returns base64 image directly in MCP image content; savePng/saveToDisk optionally writes an evidence artifact and returns fullPath when saved. Default output is compressed JPEG with maxWidth <= 1280px.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -601,11 +612,11 @@ TOOL_DEFINITIONS = {
                 },
                 "savePng": {
                     "type": "boolean",
-                    "description": "Save screenshot to system temporary directory for debugging (default: false, zero disk write by default)"
+                    "description": "Save screenshot as an evidence artifact (default: false); response includes fullPath when saved."
                 },
                 "saveToDisk": {
                     "type": "boolean",
-                    "description": "Deprecated alias for savePng (default: false, zero disk write by default; saves to system temp, not Downloads). Prefer savePng."
+                    "description": "Alias for savePng; saves an evidence artifact and returns fullPath when available."
                 },
                 "som": {
                     "type": "boolean",
@@ -1178,7 +1189,7 @@ TOOL_DEFINITIONS = {
         }
     },
     "browserclaw_batch_actions": {
-        "description": "Execute a sequential multi-step pipeline of browser actions in a single round-trip without waiting for intermediate model turns.\n* CRITICAL EFFICIENCY RULE: When the next 2+ actions are predictable (e.g. form filling: [fill username, fill password, click submit]; or search flow: [fill query, press Enter, wait]), ALWAYS use browserclaw_batch_actions instead of individual tool calls. It completes the entire sequence in 1 turn (3~5x faster, 75%+ lower token cost).\n* Supported action types: click, double_click, right_click, fill, hover, scroll, press_key, wait, fill_form, assert, extract.\n* Set includeDelta: true to automatically inspect DOM changes after the pipeline completes.",
+        "description": "Execute a sequential multi-step pipeline of browser actions in a single round-trip without waiting for intermediate model turns.\n* CRITICAL EFFICIENCY RULE: When the next 2+ actions are predictable (e.g. form filling: [fill username, fill password, click submit]; or search flow: [fill query, press Enter, wait]), ALWAYS use browserclaw_batch_actions instead of individual tool calls. It completes the entire sequence in 1 turn (3~5x faster, 75%+ lower token cost).\n* Supported action types: click, double_click, right_click, fill, hover, scroll, press_key, wait, waitForSelector, waitForUrl, fill_form, assert, extract.\n* Set includeDelta: true to automatically inspect DOM changes after the pipeline completes.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1198,6 +1209,8 @@ TOOL_DEFINITIONS = {
                                     "scroll",
                                     "press_key",
                                     "wait",
+                                    "waitForSelector",
+                                    "waitForUrl",
                                     "key",
                                     "fill_form",
                                     "assert",
@@ -1233,8 +1246,7 @@ TOOL_DEFINITIONS = {
                                 "description": "Whether to automatically submit the form after filling (clicks detected submit button or presses Enter) (for type: fill)"
                             },
                             "fields": {
-                                "type": "array",
-                                "items": {
+                                "oneOf": [{"type": "object", "additionalProperties": {"type": ["string", "number", "boolean"]}}, {"type": "array", "items": {
                                     "type": "object",
                                     "properties": {
                                         "ref": {
@@ -1252,6 +1264,8 @@ TOOL_DEFINITIONS = {
                                             "type": "string",
                                             "description": "CSS selector or XPath for target field"
                                         },
+                                        "label": {"type": "string", "description": "Visible label or accessible name to resolve an unambiguous field."},
+                                        "formSelector": {"type": "string", "description": "Optional form CSS selector for label matching."},
                                         "value": {
                                             "type": [
                                                 "string",
@@ -1270,9 +1284,10 @@ TOOL_DEFINITIONS = {
                                         }
                                     },
                                     "required": []
-                                },
-                                "description": "Array of field descriptors to fill sequentially (for fill_form)"
+                                }}],
+                                "description": "Field descriptors or visible-label-to-value map for fill_form"
                             },
+                            "formSelector": {"type": "string", "description": "Optional form CSS selector for fill_form label matching."},
                             "text": {
                                 "type": "string",
                                 "description": "Text to type/fill"
@@ -1323,6 +1338,7 @@ TOOL_DEFINITIONS = {
                                 "type": "number",
                                 "description": "Coordinate Y (for scroll/click, alias)"
                             },
+                            "url": {"type": "string", "description": "Expected URL or URL substring for waitForUrl."},
                             "at": {
                                 "type": "number",
                                 "description": "Absolute epoch-ms deadline: sleep until this instant before executing this action (extension-side timer, no extra round-trip)"
@@ -1393,7 +1409,7 @@ TOOL_DEFINITIONS = {
                             },
                             "timeoutMs": {
                                 "type": "number",
-                                "description": "Async polling timeout in milliseconds for assertion settling (default: 300ms)"
+                                "description": "Polling timeout for assertions (default: 300ms) or selector/URL waits (default: 5000ms)"
                             },
                             "abortOnFailure": {
                                 "type": "boolean",
@@ -1404,6 +1420,8 @@ TOOL_DEFINITIONS = {
                                 "enum": [
                                     "text",
                                     "value",
+                                    "selectedValue",
+                                    "selectedText",
                                     "attribute"
                                 ],
                                 "description": "Property to extract (default: \"text\")"
@@ -2573,13 +2591,65 @@ def _register_display_formatters() -> None:
     except Exception:
         pass
 
+
+for _tool_meta in TOOL_DEFINITIONS.values():
+    _tool_meta['inputSchema'] = _with_browser_id(_tool_meta.get('inputSchema', {}))
+
+
+_CORE_DESCRIPTION_FIELDS = {
+    'url', 'ref', 'selector', 'targetIndex', 'tabId', 'windowId', 'limit', 'cursor',
+    'actions', 'action', 'query', 'category', 'browserId', 'format', 'coordinate',
+    'sessionId', 'timeoutMs', 'maxLength', 'text', 'value', 'direction', 'amount',
+}
+
+
+def _shorten_schema_descriptions(value: Any, property_name: Optional[str] = None, is_tool: bool = False) -> Any:
+    """Keep core schema guidance brief; detailed instructions live in tool_docs."""
+    if isinstance(value, list):
+        return [_shorten_schema_descriptions(item, property_name, is_tool) for item in value]
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if key == 'description' and isinstance(item, str):
+                if not is_tool and property_name and property_name not in _CORE_DESCRIPTION_FIELDS:
+                    continue
+                result[key] = _short_description(item, 120 if is_tool else 25)
+            elif key == 'properties' and isinstance(item, dict):
+                result[key] = {name: _shorten_schema_descriptions(prop, name) for name, prop in item.items()}
+            elif isinstance(item, (dict, list)):
+                result[key] = _shorten_schema_descriptions(item, property_name, is_tool)
+            else:
+                result[key] = item
+        return result
+    return value
+
+
+def _short_description(description: str, max_length: int = 120) -> str:
+    first = re.split(r'(?<=[.!?])\s+', description.strip(), maxsplit=1)[0]
+    return first if len(first) <= max_length else first[:max_length - 3].rstrip() + '...'
+
+
+for _tool_name, _tool_meta in TOOL_DEFINITIONS.items():
+    _tool_meta['description'] = _short_description(_tool_meta.get('description', ''))
+    _tool_meta = _shorten_schema_descriptions(_tool_meta, is_tool=True)
+    if _tool_name == 'browserclaw_extract':
+        _tool_meta['description'] = 'Extract schema fields with sourceRefs; absent fields are missing, never invented.'
+    if _tool_name == 'browserclaw_read_dom':
+        _tool_meta['inputSchema']['properties']['deltaOnly']['description'] = 'default: true; unchanged reads return a compact marker.'
+        _tool_meta['inputSchema']['properties']['includeAssets'] = {'type': 'boolean'}
+    if _tool_name == 'browserclaw_get_markdown':
+        _tool_meta['inputSchema']['properties']['mode'] = {'type': 'string', 'enum': ['full', 'outline']}
+    TOOL_DEFINITIONS[_tool_name] = _tool_meta
+
 def register(ctx: Any) -> None:
     global _plugin_config
     if hasattr(ctx, 'config') and ctx.config:
         try:
             if hasattr(ctx.config, 'get'):
                 _plugin_config['native_server_port'] = int(ctx.config.get('native_server_port', 12306) or 12306)
+                _plugin_config['edge_server_port'] = int(ctx.config.get('edge_server_port', 12307) or 12307)
                 _plugin_config['auth_token'] = ctx.config.get('auth_token', None)
+                _plugin_config['edge_auth_token'] = ctx.config.get('edge_auth_token', None)
                 _plugin_config['isolate_modal'] = bool(ctx.config.get('isolate_modal', False))
             elif isinstance(ctx.config, dict):
                 _plugin_config['native_server_port'] = int(ctx.config.get('native_server_port', 12306) or 12306)
@@ -2683,4 +2753,3 @@ def browserclaw_eval(script: str, tab_id: Optional[int] = None) -> str:
 def browserclaw_execute_script(script: str, tab_id: Optional[int] = None) -> str:
     """Alias for browserclaw_eval."""
     return browserclaw_eval(script, tab_id=tab_id)
-

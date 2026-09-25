@@ -41,6 +41,8 @@ describe('Fastify MCP Native Server Integration Tests', () => {
     expect(response.body).toEqual({
       status: 'ok',
       message: 'pong',
+      browserId: 'chrome',
+      port: expect.any(Number),
     });
   });
 

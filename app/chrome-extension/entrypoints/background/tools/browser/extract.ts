@@ -198,7 +198,9 @@ function findByLabel(root: ParentNode, key: string): Element | null {
     }
     const wrapped = label.querySelector('input, textarea, select');
     if (wrapped) return wrapped as Element;
-    return label as Element;
+    // A text label without an associated control is not a trustworthy field
+    // value: its text may include an entire card or page container.
+    return null;
   }
   return null;
 }

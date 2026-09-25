@@ -1,7 +1,7 @@
 manifest_version: 1
 name: browserclaw
 version: '3.1.0'
-description: 'BrowserClaw — High-speed, dual-brain Chrome browser automation with 1-based DOM indexing, visual fallbacks, Jev System 1 micro-loop, and local MCP bridge.'
+description: 'Browser automation with DOM indexing, visual fallbacks, and a local MCP bridge.'
 author: GoldenLoaf24h
 license: AGPL-3.0
 homepage: https://github.com/GoldenLoaf24h/browserclaw

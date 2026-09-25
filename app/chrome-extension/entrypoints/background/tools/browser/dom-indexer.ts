@@ -501,8 +501,8 @@ export async function inPageScrollUntilFound(
         'button, a, input, textarea, select, h1, h2, h3, h4, h5, h6, [role="button"], [role="article"], [role="link"], [data-testid], article, p, span, li, div, section, blockquote, label, td, th, dt, dd, strong, b, i, em, code, pre, figcaption',
         document,
       );
-      for (const el of candidates) {
-        if (!el || !(el instanceof Element)) continue;
+      const matching = candidates.filter((el) => {
+        if (!el || !(el instanceof Element)) return false;
         const text = (
           el.textContent ||
           el.getAttribute('aria-label') ||
@@ -515,11 +515,16 @@ export async function inPageScrollUntilFound(
           if (rect.width > 0 && rect.height > 0) {
             const style = window.getComputedStyle(el);
             if (style.display !== 'none' && style.visibility !== 'hidden') {
-              return el;
+              return true;
             }
           }
         }
-      }
+        return false;
+      });
+      matching.sort(
+        (a, b) => (a.textContent || '').trim().length - (b.textContent || '').trim().length,
+      );
+      if (matching.length) return matching[0];
     }
 
     return null;
@@ -558,6 +563,25 @@ export async function inPageScrollUntilFound(
         hit.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' as any });
       } catch {}
       await wait(50);
+
+      const centeredRect = hit.getBoundingClientRect();
+      const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+      const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+      if (
+        centeredRect.width <= 0 ||
+        centeredRect.height <= 0 ||
+        centeredRect.bottom <= 0 ||
+        centeredRect.top >= viewportHeight ||
+        centeredRect.right <= 0 ||
+        centeredRect.left >= viewportWidth
+      ) {
+        return {
+          found: false,
+          stepsTaken,
+          scrolledPx: totalScrolledPx,
+          message: `Target "${query || selector}" matched but was not visible after centering.`,
+        };
+      }
 
       // Resolve or allocate live 1-based index in isolatedMap
       let targetIndex: number | undefined;
@@ -2988,6 +3012,22 @@ export function inPageDOMPruner(options?: {
           continue;
         }
 
+        const cardSelector =
+          'article, [role="article"], [role="listitem"], li, [aria-roledescription="card"], div.col-sm-4';
+        const targetCard = el.closest(cardSelector);
+        const hitCard = topEl.closest(cardSelector);
+        if (targetCard && hitCard === targetCard) {
+          const pt = {
+            x: Math.round(px),
+            y: Math.round(py),
+            offsetX: rect.width * rx,
+            offsetY: rect.height * ry,
+          };
+          clearPoints.push(pt);
+          if (rx === 0.5 && ry === 0.5) centerClearPoint = pt;
+          continue;
+        }
+
         try {
           const topStyle = window.getComputedStyle(topEl);
           if (
@@ -3397,10 +3437,21 @@ export function inPageDOMPruner(options?: {
     const isWrapperOverFormControl =
       (tag === 'label' || tag === 'span' || tag === 'div') && hasFormControlDescendant(node, 2);
 
+    const inputType =
+      tag === 'input' ? ((node as HTMLInputElement).type || 'text').toLowerCase() : '';
+    const isFocusableTextInput =
+      !(node as HTMLInputElement).disabled &&
+      (node as HTMLElement).tabIndex >= 0 &&
+      ((tag === 'input' && ['text', 'search', 'email', 'password', 'number'].includes(inputType)) ||
+        tag === 'textarea');
     if (
       !isZeroSize &&
       !isWrapperOverFormControl &&
-      (interactive || isFile || (informational && hasInfoText) || isClosedHost)
+      (interactive ||
+        isFile ||
+        isFocusableTextInput ||
+        (informational && hasInfoText) ||
+        isClosedHost)
     ) {
       candidates.push({
         node,
@@ -3701,18 +3752,8 @@ export function inPageDOMPruner(options?: {
     traverse(root, null, false, false);
   }
 
-  // Phase 2: Deterministic visual reading-order sort (top-to-bottom, left-to-right)
-  candidates.sort((a, b) => {
-    const ay = a.rect?.y ?? a.rect?.top ?? 0;
-    const by = b.rect?.y ?? b.rect?.top ?? 0;
-    const ax = a.rect?.x ?? a.rect?.left ?? 0;
-    const bx = b.rect?.x ?? b.rect?.left ?? 0;
-    const dy = Math.round(ay) - Math.round(by);
-    if (Math.abs(dy) > 4) {
-      return dy;
-    }
-    return Math.round(ax) - Math.round(bx);
-  });
+  // Preserve traversal/document order. Visual sorting can interleave actions
+  // and headings from adjacent cards when their geometry overlaps.
 
   type TreeOutputItem = { type: 'element'; el: IndexedElement } | { type: 'marker'; line: string };
   const treeOutputItems: TreeOutputItem[] = [];
@@ -3844,10 +3885,55 @@ export function inPageDOMPruner(options?: {
       attributes['selected'] = (cand.node as HTMLOptionElement).selected ? 'true' : 'false';
     }
 
-    const candText =
+    if (cand.tag === 'select') {
+      const select = cand.node as HTMLSelectElement;
+      const selected = select.selectedOptions?.[0];
+      attributes['selectedValue'] = selected?.value ?? select.value;
+      attributes['selectedText'] = (selected?.textContent || selected?.text || '').trim();
+    }
+
+    let actionOwner: string | undefined;
+    let candText =
       cand.text ||
       (cand.node ? (cand.node.textContent || '').trim().slice(0, 100) : undefined) ||
       undefined;
+    // Keep repeated card actions in document order, but qualify each action
+    // with its own card's visible name and price so identical labels remain actionable.
+    if (cand.isInteractive && cand.node instanceof Element && candText) {
+      const actionLabel = candText.replace(/\s+/g, ' ').trim();
+      const card = cand.node.closest(
+        'article, [role="article"], [role="listitem"], li, [aria-roledescription="card"], div.col-sm-4',
+      );
+      const siblings = card?.parentElement
+        ? Array.from(card.parentElement.children).filter((el) =>
+            el.matches(
+              'article, [role="article"], [role="listitem"], li, [aria-roledescription="card"], div.col-sm-4',
+            ),
+          )
+        : [];
+      const sameActions = siblings.filter((item) =>
+        Array.from(item.querySelectorAll('a, button, [role="button"]')).some(
+          (action) =>
+            (action.textContent || action.getAttribute('aria-label') || '')
+              .replace(/\s+/g, ' ')
+              .trim() === actionLabel,
+        ),
+      );
+      if (card && sameActions.length > 1) {
+        const fragments = Array.from(card.querySelectorAll('h1, h2, h3, h4, p, [class*="price" i]'))
+          .map((node) => (node.textContent || '').replace(/\s+/g, ' ').trim())
+          .filter(Boolean);
+        const price = fragments.find((value) =>
+          /(?:[$€£¥]|\b(?:Rs\.?|USD|EUR|GBP))\s*[\d,.]+/i.test(value),
+        );
+        const name = fragments.find(
+          (value) =>
+            value !== price && !/(?:[$€£¥]|\b(?:Rs\.?|USD|EUR|GBP))\s*[\d,.]+/i.test(value),
+        );
+        actionOwner = [name, price].filter(Boolean).join(' — ') || undefined;
+        if (actionOwner) candText = `${actionLabel} (${actionOwner})`;
+      }
+    }
     getIndexFingerprintMap().set(assignedIndex, {
       tag: cand.tag,
       id: attributes.id,
@@ -3983,6 +4069,7 @@ export function inPageDOMPruner(options?: {
     let text = isCard
       ? (cand as any).aggregatedText
       : extractCleanElementText(cand.node, maxTextLength);
+    if (actionOwner && text) text = `${text} (${actionOwner})`;
     const editorSemantics = detectEditorSemantics(cand.node);
     let role = isCard ? 'card' : cand.node.getAttribute('role') || undefined;
 
@@ -4090,7 +4177,7 @@ export function inPageDOMPruner(options?: {
         : el.inShadowDom
           ? ' [shadow]'
           : '';
-      return `[${el.index}]${shadowPart} <${el.tagName}${attrStr ? ' ' + attrStr : ''}${valPart}>${textPart}</${el.tagName}>${occludedPart}`;
+      return `[${el.index}|${el.ref || `e${el.index}`}]${shadowPart} <${el.tagName}${attrStr ? ' ' + attrStr : ''}${valPart}>${textPart}</${el.tagName}>${occludedPart}`;
     }
     return renderCompactElementLine(el);
   });
@@ -6717,7 +6804,13 @@ export function inPageVerifyInputCommitment(
       upCount++;
     }
 
-    const candidateBtn = candidateButtons.find((b) => {
+    // Labels whose LEADING verb means "throw away what I typed". These are never a submit
+    // target when any other candidate exists — e.g. YouTube's "Clear search query" control
+    // sits before the real search button and must not be auto-clicked.
+    const destructiveLeadingRe =
+      /^(clear|reset|cancel|dismiss|remove|delete|erase|undo|discard)(?![a-z])|^(清除|清空|重置|取消|删除)/i;
+
+    const scoreSubmitCandidate = (b: Element): number => {
       const type = (b.getAttribute('type') || '').toLowerCase();
       const text = (b.textContent || (b as HTMLInputElement).value || '').trim().toLowerCase();
       const testId = (b.getAttribute('data-testid') || '').toLowerCase();
@@ -6732,52 +6825,45 @@ export function inPageVerifyInputCommitment(
         b.querySelector('svg, i, [class*="search" i], [data-icon*="search" i]'),
       );
 
-      return (
-        type === 'submit' ||
-        testId.includes('submit') ||
-        testId.includes('send') ||
-        testId.includes('post') ||
-        testId.includes('publish') ||
-        testId.includes('confirm') ||
-        testId.includes('tweet') ||
-        testId.includes('search') ||
-        testId.includes('query') ||
-        ariaLabel.includes('tweet') ||
-        ariaLabel.includes('post') ||
-        ariaLabel.includes('submit') ||
-        ariaLabel.includes('send') ||
-        ariaLabel.includes('search') ||
-        ariaLabel.includes('query') ||
-        ariaLabel.includes('搜索') ||
-        ariaLabel.includes('查询') ||
-        ariaLabel.includes('提交') ||
-        title.includes('search') ||
-        title.includes('搜索') ||
-        title.includes('查询') ||
-        title.includes('提交') ||
-        name.includes('submit') ||
-        name.includes('search') ||
-        name.includes('query') ||
-        name.includes('btnsearch') ||
-        id.includes('submit') ||
-        id.includes('search') ||
-        id.includes('btnsearch') ||
-        href.includes('dopostback') ||
-        className.includes('btn-search') ||
-        className.includes('search-btn') ||
-        className.includes('search-button') ||
-        className.includes('btn-primary') ||
-        className.includes('btn-action') ||
-        className.includes('btn-submit') ||
-        className.includes('button-primary') ||
-        className.includes('is-primary') ||
-        className.includes('submit-btn') ||
-        hasSearchIconOrChild ||
+      const labelBag = `${testId} ${ariaLabel} ${title} ${name} ${id}`;
+      let score = 0;
+
+      if (type === 'submit') score += 120;
+      if (/submit|send|post|publish|confirm|tweet|dopostback/.test(labelBag)) score += 80;
+      if (/search|query|搜索|查询/.test(labelBag)) score += 60;
+      if (href.includes('dopostback')) score += 60;
+      if (/btn-search|search-btn|search-button|btn-submit|submit-btn/.test(className)) score += 60;
+      if (/btn-primary|btn-action|button-primary|is-primary/.test(className)) score += 30;
+      if (
         /(tweet|post|reply|send|submit|发布|发帖|发送|提交|ok|next|continue|确认|确定|查询|搜索|search|query|find|go|enter|login|sign in)/i.test(
           text,
         )
-      );
-    });
+      )
+        score += 40;
+      // An icon inside the button is only a weak hint: every toolbar/menu button has one.
+      if (hasSearchIconOrChild) score += 5;
+
+      if (
+        type === 'reset' ||
+        destructiveLeadingRe.test(`${text} ${ariaLabel} ${title} ${testId}`.trim())
+      ) {
+        score -= 300;
+      }
+      return score;
+    };
+
+    // Pick the highest-scoring candidate (stable: first in DOM order wins ties). A bare icon
+    // button scores 5 and is intentionally below the floor, so an unidentifiable icon control
+    // is reported as "no submit button" rather than clicked blindly.
+    let candidateBtn: Element | undefined;
+    let bestSubmitScore = 5;
+    for (const b of candidateButtons) {
+      const score = scoreSubmitCandidate(b);
+      if (score > bestSubmitScore) {
+        bestSubmitScore = score;
+        candidateBtn = b;
+      }
+    }
 
     if (candidateBtn) {
       const disabled =
@@ -7051,6 +7137,7 @@ export interface PerceptiveSignature {
   stepTotal?: number;
   activeInputs: Array<{
     index?: number;
+    ref?: string;
     tagName: string;
     type?: string;
     name?: string;
@@ -7192,6 +7279,7 @@ export function inPageDetectPerceptiveSignature(): PerceptiveSignature {
 
   // 3. Detect active form inputs in active viewport
   const isolatedMap = getIsolatedIndexMap();
+  const persistentRefMap = getPersistentRefMap();
   const indexLookup = new Map<Element, number>();
   for (const [idx, entry] of isolatedMap.entries()) {
     const target = derefElement(entry);
@@ -7228,6 +7316,7 @@ export function inPageDetectPerceptiveSignature(): PerceptiveSignature {
 
     activeInputs.push({
       index: inpIndex,
+      ref: persistentRefMap.mint(inp),
       tagName: tag,
       type,
       name,
@@ -8719,7 +8808,7 @@ export function renderCompactElementLine(el: IndexedElement, frameId?: string | 
     text = `"${el.attributes.title}"`;
   }
 
-  const parts: string[] = [`[${el.index}]`];
+  const parts: string[] = [`[${el.index}|${el.ref || `e${el.index}`}]`];
   if (el.isClosedShadowHost) {
     parts.push('[closed-shadow-host]');
   } else if (el.inShadowDom) {
@@ -8737,7 +8826,7 @@ export function renderCompactElementLine(el: IndexedElement, frameId?: string | 
   if (el.attributes?.name) parts.push(`name="${el.attributes.name}"`);
   if (el.attributes?.placeholder) parts.push(`placeholder="${el.attributes.placeholder}"`);
   if (tag === 'a' && el.attributes?.href) parts.push(`href="${el.attributes.href}"`);
-  if (el.value !== undefined && el.value !== '') {
+  if (tag !== 'select' && el.value !== undefined && el.value !== '') {
     const isSensitive =
       inputType === 'password' ||
       el.attributes?.name?.toLowerCase().includes('password') ||
@@ -8746,16 +8835,29 @@ export function renderCompactElementLine(el: IndexedElement, frameId?: string | 
     const valDisplay = isSensitive ? '•••' : el.value;
     parts.push(`value="${valDisplay}"`);
   }
+  if (tag === 'select') {
+    parts.push(`value="${el.value ?? ''}"`);
+    if (el.attributes?.selectedValue !== undefined) {
+      parts.push(`selectedValue="${el.attributes.selectedValue}"`);
+    }
+    if (el.attributes?.selectedText !== undefined) {
+      parts.push(`selectedText="${el.attributes.selectedText}"`);
+    }
+  }
   if (el.attributes?.['visual-shape']) parts.push(`shape="${el.attributes['visual-shape']}"`);
 
   if (el.attributes?.required === 'true' || el.attributes?.required === '') parts.push('required');
   if (el.attributes?.disabled === 'true' || el.attributes?.disabled === '') parts.push('disabled');
-  if (
+  if (inputType === 'checkbox' || inputType === 'radio') {
+    const checked = el.attributes?.['aria-checked'] ?? el.attributes?.checked;
+    if (checked !== undefined) parts.push(`checked=${checked === 'true' || checked === ''}`);
+  } else if (
     el.attributes?.['aria-checked'] === 'true' ||
     el.attributes?.checked === 'true' ||
     el.attributes?.checked === ''
-  )
+  ) {
     parts.push('checked');
+  }
   if (el.attributes?.['aria-selected'] === 'true') parts.push('selected');
   if (el.attributes?.['aria-expanded']) parts.push(`expanded=${el.attributes['aria-expanded']}`);
 

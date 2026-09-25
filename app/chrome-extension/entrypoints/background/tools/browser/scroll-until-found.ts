@@ -62,16 +62,57 @@ export class ScrollUntilFoundTool extends BaseBrowserToolExecutor {
         settleMs: args.settleMs,
       };
 
-      const results = await executeInPage<ScrollUntilFoundResult>(
-        { tabId },
-        'inPageScrollUntilFound',
-        [inPageOptions],
-        timeoutMs + 3000,
-      );
+      const maxSteps = Math.min(Math.max(1, inPageOptions.maxSteps ?? 10), 50);
+      let res: ScrollUntilFoundResult | undefined;
+      let stepsTaken = 0;
+      let scrolledPx = 0;
+      // Run one step at a time so the background tool can stop immediately at
+      // the scroll boundary instead of spending the remaining step budget.
+      for (let step = 0; step < maxSteps; step++) {
+        const results = await executeInPage<ScrollUntilFoundResult>(
+          { tabId },
+          'inPageScrollUntilFound',
+          [{ ...inPageOptions, maxSteps: 1 }],
+          timeoutMs + 3000,
+        );
+        res = results?.[0]?.result;
+        if (!res) break;
+        stepsTaken += res.stepsTaken;
+        scrolledPx += res.scrolledPx;
+        if (res.found) break;
 
-      const res = results?.[0]?.result;
+        const targets = await executeInPage<any>({ tabId }, 'inPageFindSmartScrollTarget', [
+          {
+            direction: inPageOptions.direction ?? 'down',
+            selector: inPageOptions.containerSelector,
+          },
+        ]);
+        const target = targets?.[0]?.result;
+        const bottomReached =
+          inPageOptions.direction !== 'up' && target && target.canScrollDown === false;
+        const topReached =
+          inPageOptions.direction === 'up' && target && target.canScrollUp === false;
+        if (bottomReached || topReached) {
+          res = {
+            ...res,
+            found: false,
+            stepsTaken,
+            scrolledPx,
+            reason: bottomReached ? 'bottom_reached' : 'top_reached',
+            closestMatches: [],
+            message: `Target "${query || selector}" not found; scroll boundary reached.`,
+          } as ScrollUntilFoundResult;
+          break;
+        }
+        if (res.found) break;
+      }
+
       if (!res) {
         return createErrorResponse('Failed to execute scroll_until_found in active tab');
+      }
+
+      if (!res.found && !(res as any).reason) {
+        res = { ...res, reason: 'max_steps', closestMatches: [] } as ScrollUntilFoundResult;
       }
 
       return {

@@ -2,10 +2,14 @@
 import { ref, computed, onMounted } from 'vue';
 
 import { CURRENT_VERSION } from 'chrome-mcp-shared';
+import { BACKGROUND_MESSAGE_TYPES } from '@/common/message-types';
+import { isPopupConnectionHealthy } from './connection-status';
 import { checkExtensionVersionUpdate } from '@/utils/version-checker';
 
 const agentEnabled = ref(true);
 const serverConnected = ref(false);
+const browserId = /Edg\//.test(globalThis.navigator?.userAgent ?? '') ? 'edge' : 'chrome';
+const serverPort = browserId === 'edge' ? 12307 : 12306;
 const cursorMode = ref<'off' | 'auto' | 'always'>('always');
 const windowMode = ref<'tab' | 'window'>('tab');
 const currentVersion = ref(CURRENT_VERSION);
@@ -52,11 +56,20 @@ const setWindowMode = async (mode: 'tab' | 'window') => {
 
 const checkServerStatus = async () => {
   try {
+    const backgroundStatus = await chrome.runtime.sendMessage({
+      type: BACKGROUND_MESSAGE_TYPES.GET_SERVER_STATUS,
+    });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 1000);
-    const res = await fetch('http://127.0.0.1:12306/ping', { signal: controller.signal });
+    const res = await fetch(`http://127.0.0.1:${serverPort}/ping`, { signal: controller.signal });
     clearTimeout(timeout);
-    serverConnected.value = res.ok;
+    const data = await res.json().catch(() => null);
+    serverConnected.value = isPopupConnectionHealthy(
+      backgroundStatus,
+      { ...data, ok: res.ok },
+      browserId,
+      serverPort,
+    );
   } catch {
     serverConnected.value = false;
   }
@@ -161,7 +174,7 @@ onMounted(async () => {
 
     <!-- Row 2: Service Status Indicator -->
     <div class="row">
-      <span class="label">{{ serverConnected ? 'Connecting' : 'Disconnected' }}</span>
+      <span class="label">{{ serverConnected ? 'Connected' : 'Disconnected' }}</span>
       <div class="status">
         <span class="dot" :class="{ online: serverConnected }"></span>
       </div>
@@ -248,7 +261,8 @@ onMounted(async () => {
           target="_blank"
           rel="noopener noreferrer"
           @click.prevent="openRelease(latestReleaseUrl)"
-        >view</a>
+          >view</a
+        >
       </div>
     </div>
   </div>

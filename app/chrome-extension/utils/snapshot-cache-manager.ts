@@ -128,7 +128,7 @@ export function compactDeltaElement(el: any): any {
 }
 
 export class SnapshotCacheManager {
-  private cache = new Map<number, CachedSnapshot>();
+  private cache = new Map<number | string, CachedSnapshot>();
   private tabRevisions = new Map<number, number>();
 
   constructor() {
@@ -141,8 +141,7 @@ export class SnapshotCacheManager {
     try {
       if (chrome.tabs?.onRemoved?.addListener) {
         chrome.tabs.onRemoved.addListener((tabId: number) => {
-          this.cache.delete(tabId);
-          this.tabRevisions.delete(tabId);
+          this.clear(tabId);
         });
       }
 
@@ -176,6 +175,7 @@ export class SnapshotCacheManager {
   public setSnapshot(
     tabId: number,
     data: { url: string; elementCount: number; elements?: any[] },
+    cacheKey: number | string = tabId,
   ): CachedSnapshot {
     const currentRev = (this.tabRevisions.get(tabId) ?? 0) + 1;
     this.tabRevisions.set(tabId, currentRev);
@@ -209,16 +209,16 @@ export class SnapshotCacheManager {
       valid: true,
       fingerprints,
     };
-    this.cache.set(tabId, snapshot);
+    this.cache.set(cacheKey, snapshot);
     return snapshot;
   }
 
   public diffWithPrevious(
     tabId: number,
     currentElements: any[],
-    options?: DiffOptions,
+    options?: DiffOptions & { cacheKey?: number | string },
   ): DomDiffResult {
-    const prev = this.cache.get(tabId);
+    const prev = this.cache.get(options?.cacheKey ?? tabId);
     const currentRev = (this.tabRevisions.get(tabId) ?? 0) + 1;
     const maxDelta = options?.maxDelta ?? DEFAULT_MAX_DELTA_CHANGES;
     const filterNoise = options?.filterNoise ?? true;
@@ -330,16 +330,18 @@ export class SnapshotCacheManager {
   }
 
   public getSnapshot(tabId: number): CachedSnapshot | undefined {
-    return this.cache.get(tabId);
+    return Array.from(this.cache.values())
+      .filter((snapshot) => snapshot.tabId === tabId)
+      .sort((a, b) => b.revision - a.revision)[0];
   }
 
   public isSnapshotValid(tabId: number): boolean {
-    const s = this.cache.get(tabId);
+    const s = this.getSnapshot(tabId);
     return s !== undefined && s.valid === true;
   }
 
   public isScopeValid(tabId: number, index: number, currentScopeHash?: string): boolean {
-    const s = this.cache.get(tabId);
+    const s = this.getSnapshot(tabId);
     if (!s || !s.fingerprints) return false;
     const fp = s.fingerprints.get(index);
     if (!fp) return false;
@@ -350,22 +352,25 @@ export class SnapshotCacheManager {
   }
 
   public invalidate(tabId: number, reason = 'DOM or URL mutated'): void {
-    const s = this.cache.get(tabId);
-    if (s) {
-      s.valid = false;
-      s.invalidationReason = reason;
+    for (const snapshot of this.cache.values()) {
+      if (snapshot.tabId === tabId) {
+        snapshot.valid = false;
+        snapshot.invalidationReason = reason;
+      }
     }
   }
 
   public getInvalidationMessage(tabId: number): string {
-    const s = this.cache.get(tabId);
+    const s = Array.from(this.cache.values()).find((snapshot) => snapshot.tabId === tabId);
     const reason = s?.invalidationReason ? ` (${s.invalidationReason})` : '';
     return `Snapshot refs invalidated: DOM or URL changed since last ${resolveToolName('read_dom')}${reason}. ACTION REQUIRED: Please call '${resolveToolName('read_dom')}' to refresh the index tree before re-attempting interaction.`;
   }
 
   public clear(tabId?: number): void {
     if (typeof tabId === 'number') {
-      this.cache.delete(tabId);
+      for (const [key, snapshot] of this.cache.entries()) {
+        if (snapshot.tabId === tabId) this.cache.delete(key);
+      }
       this.tabRevisions.delete(tabId);
     } else {
       this.cache.clear();

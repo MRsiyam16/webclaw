@@ -2,6 +2,23 @@ import { describe, it, expect, vi } from 'vitest';
 import { grepTool } from '../entrypoints/background/tools/browser/grep';
 
 describe('GrepTool (chrome_grep)', () => {
+  it('counts all fallback text hits even when returned matches are limited', async () => {
+    const engine = await import('../entrypoints/background/tools/browser/in-page-engine');
+    vi.spyOn(grepTool as any, 'resolveAffinityTab').mockResolvedValue({ id: 123 });
+    vi.spyOn(engine, 'executeInPage').mockImplementation(async (_target: any, fnName: string) => {
+      if (fnName === 'inPageDOMPruner')
+        return [{ frameId: 0, result: { indexedElements: [], indexMap: {} } }] as any;
+      if (fnName === 'inPageExtractDeepPageText')
+        return [{ frameId: 0, result: 'Pause\nPause\nPause' }] as any;
+      return [] as any;
+    });
+    const result = await grepTool.execute({ query: 'Pause', limit: 1 });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.totalMatches).toBe(3);
+    expect(parsed.returnedCount).toBe(1);
+    expect(parsed.truncated).toBe(true);
+  });
+
   it('fails with validation error when query is empty', async () => {
     const res = await grepTool.execute({ query: '' });
     expect(res.isError).toBe(true);

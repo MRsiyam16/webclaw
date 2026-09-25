@@ -25,7 +25,10 @@ program
   .description('Register Native Messaging host')
   .option('-f, --force', 'Force re-registration')
   .option('-s, --system', 'Use system-level installation (requires administrator/sudo privileges)')
-  .option('-b, --browser <browser>', 'Register for specific browser (chrome, chromium, or all)')
+  .option(
+    '-b, --browser <browser>',
+    'Register for specific browser (chrome, edge, chromium, or all)',
+  )
   .option('-d, --detect', 'Auto-detect installed browsers')
   .action(async (options) => {
     try {
@@ -37,14 +40,14 @@ program
 
       if (options.browser) {
         if (options.browser.toLowerCase() === 'all') {
-          targetBrowsers = [BrowserType.CHROME, BrowserType.CHROMIUM];
+          targetBrowsers = [BrowserType.CHROME, BrowserType.EDGE, BrowserType.CHROMIUM];
           console.log(colorText('Registering for all supported browsers...', 'blue'));
         } else {
           const browserType = parseBrowserType(options.browser);
           if (!browserType) {
             console.error(
               colorText(
-                `Invalid browser: ${options.browser}. Use 'chrome', 'chromium', or 'all'`,
+                `Invalid browser: ${options.browser}. Use 'chrome', 'edge', 'chromium', or 'all'`,
                 'red',
               ),
             );

@@ -1,6 +1,6 @@
 import { createErrorResponse, ToolResult } from '@/common/tool-handler';
 import { BaseBrowserToolExecutor } from '../base-browser';
-import { TOOL_NAMES, TOOL_SCHEMAS, TOOL_CATEGORIES } from 'chrome-mcp-shared';
+import { TOOL_NAMES, RAW_TOOL_SCHEMAS, TOOL_CATEGORIES } from 'chrome-mcp-shared';
 
 interface ToolDocsParams {
   category:
@@ -29,6 +29,9 @@ const POWER_RISK_TIER = 3;
  */
 const POWER_WARNING =
   'SAFETY: power tools run unconstrained page code in the target tab. chrome_javascript can read document.cookie and other page secrets, and chrome_cdp_execute can drive arbitrary input (raw Input/Page/Runtime CDP commands) — including clicks and keystrokes the user did not ask for. Only activate these for the current session and only when the task genuinely needs them.';
+
+const PERCEIVE_USAGE =
+  'read_dom defaults to 40 indexed elements; use limit/cursor to page, deltaOnly:false for a full repeat, includeAssets:true for visual assets. Reuse stable ref rather than positional index. grep fallbackUsed:true with scanScope:page_text means matches are text lines, not interactive elements; totalMatches and truncated describe the full scan. Prefer one batch_actions call for fill + submit.';
 
 interface PowerDocsResult extends ToolResult {
   metadata: {
@@ -66,7 +69,7 @@ export class ToolDocsTool extends BaseBrowserToolExecutor {
         `Unknown category '${category}'. Valid: ${Object.keys(TOOL_CATEGORIES).join(', ')}`,
       );
     }
-    const docs = TOOL_SCHEMAS.filter((t) => names.has(t.name))
+    const docs = RAW_TOOL_SCHEMAS.filter((t) => names.has(t.name))
       .map((t) => {
         const props = (t.inputSchema as any)?.properties ?? {};
         const required: string[] = (t.inputSchema as any)?.required ?? [];
@@ -74,11 +77,11 @@ export class ToolDocsTool extends BaseBrowserToolExecutor {
           .map(([k, v]) => {
             const enums = v.enum ? `:${v.enum.join('|')}` : '';
             const req = required.includes(k) ? ' (required)' : '';
-            const desc = (v.description || '').split('\n')[0].slice(0, 90);
+            const desc = (v.description || '').split('\n')[0].slice(0, 160);
             return `  ${k}${enums}${req}: ${desc}`;
           })
           .join('\n');
-        const desc = (t.description || '').split('\n')[0].slice(0, 140);
+        const desc = (t.description || '').split('\n')[0].slice(0, 600);
         return `${t.name} - ${desc}\n${params}`;
       })
       .join('\n\n');
@@ -88,7 +91,7 @@ export class ToolDocsTool extends BaseBrowserToolExecutor {
         content: [
           {
             type: 'text',
-            text: `[${args.category}] ${docs}`,
+            text: `[${args.category}] ${docs}${category === 'perceive' ? `\n\n${PERCEIVE_USAGE}` : ''}`,
           },
         ],
         isError: false,

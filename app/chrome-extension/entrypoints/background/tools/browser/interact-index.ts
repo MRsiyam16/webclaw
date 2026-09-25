@@ -1228,7 +1228,15 @@ export class InteractIndexTool extends BaseBrowserToolExecutor {
               // Click Probe / Mask Piercing Fallback: if native CDP events were dropped (e.g. background tab throttling)
               // or if a transparent/transient mask intercepted the click, fall back to synthetic DOM event dispatch
               // directly on the underlying target element to ensure 100% execution.
-              if (action === 'click') {
+              // A navigation replaces the document and its delivery probe. Do not
+              // synthesize a second click when the first already changed the URL.
+              const probeTab =
+                !maskPierced && action === 'click' && previousUrl
+                  ? await chrome.tabs.get(tabId).catch(() => null)
+                  : null;
+              const navigated = Boolean(probeTab?.url && probeTab.url !== previousUrl);
+              if (navigated) deliveryVerified = true;
+              if (action === 'click' && !navigated) {
                 try {
                   const synRes = (
                     await executeInPage(targetScope, 'inPageDispatchSyntheticClick', [
@@ -1285,6 +1293,43 @@ export class InteractIndexTool extends BaseBrowserToolExecutor {
           currentUrl = updatedTab.url || previousUrl;
         } catch {}
         const urlChanged = Boolean(previousUrl && currentUrl && previousUrl !== currentUrl);
+        const overlayOpened = (
+          await this.safeExecuteScript(tabId, {
+            target: { tabId },
+            func: () => {
+              const candidates = Array.from(
+                document.querySelectorAll<HTMLElement>(
+                  '[role="dialog"], [aria-modal="true"], dialog[open], .modal.show, .modal.in',
+                ),
+              );
+              const el = candidates.find((node) => {
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return (
+                  rect.width > 0 &&
+                  rect.height > 0 &&
+                  style.display !== 'none' &&
+                  style.visibility !== 'hidden'
+                );
+              });
+              if (!el) return { opened: false };
+              const selector = el.id
+                ? `#${CSS.escape(el.id)}`
+                : `${el.tagName.toLowerCase()}[role="${el.getAttribute('role') || 'dialog'}"]`;
+              return {
+                opened: true,
+                kind: 'modal',
+                selector,
+                title:
+                  el.getAttribute('aria-label') ||
+                  el.querySelector('h1,h2,h3,[role="heading"]')?.textContent?.trim() ||
+                  undefined,
+              };
+            },
+          })
+        )
+          .map((r: any) => r.result)
+          .find(Boolean);
 
         const networkResult = await netCapture.waitForResult();
 
@@ -1375,6 +1420,8 @@ export class InteractIndexTool extends BaseBrowserToolExecutor {
                 {
                   success: true,
                   urlChanged,
+                  navigation: { changed: urlChanged },
+                  ...(overlayOpened?.opened ? { overlayOpened } : {}),
                   previousUrl,
                   currentUrl,
                   index: args.index ?? null,
@@ -1384,6 +1431,7 @@ export class InteractIndexTool extends BaseBrowserToolExecutor {
                   ...(coordWarning ? { warning: coordWarning } : {}),
                   ...(networkResult ? { networkResult } : {}),
                   isTrusted: usedNativeCDP,
+                  deliveryMethod: usedNativeCDP ? 'cdp_input' : 'synthetic',
                   coordinates: { x, y },
                   fallbackTriggered,
                   ...(tabHandover ? { tabHandover } : {}),

@@ -42,12 +42,20 @@ async function verifyServerViaHttp(port: number): Promise<boolean> {
     clearTimeout(timer);
     if (res.ok) {
       const data = await res.json().catch(() => ({}));
-      return data.status === 'ok' || data.message === 'pong' || res.status === 200;
+      return data.status === 'ok' && data.browserId === getBrowserId() && data.port === port;
     }
   } catch {
     // Ignore error
   }
   return false;
+}
+
+function getBrowserId(): 'chrome' | 'edge' {
+  return /Edg\//.test(globalThis.navigator?.userAgent ?? '') ? 'edge' : 'chrome';
+}
+
+function getDefaultPort(): number {
+  return getBrowserId() === 'edge' ? 12307 : NATIVE_HOST.DEFAULT_PORT;
 }
 
 /**
@@ -56,6 +64,7 @@ async function verifyServerViaHttp(port: number): Promise<boolean> {
 interface ServerStatus {
   isRunning: boolean;
   port?: number;
+  browserId?: 'chrome' | 'edge';
   token?: string;
   lastUpdated: number;
 }
@@ -237,19 +246,22 @@ async function getPreferredPort(override?: unknown): Promise<number> {
     const result: Record<string, any> = rawResult || {};
 
     const userPort = normalizePort(result[STORAGE_KEYS.NATIVE_SERVER_PORT]);
-    if (userPort) return userPort;
+    if (userPort && !(getBrowserId() === 'edge' && userPort === NATIVE_HOST.DEFAULT_PORT))
+      return userPort;
 
     const status = result[STORAGE_KEYS.SERVER_STATUS] as Partial<ServerStatus> | undefined;
     const statusPort = normalizePort(status?.port);
-    if (statusPort) return statusPort;
+    if (statusPort && !(getBrowserId() === 'edge' && statusPort === NATIVE_HOST.DEFAULT_PORT))
+      return statusPort;
   } catch (error) {
     console.warn(`${LOG_PREFIX} Failed to read preferred port`, error);
   }
 
   const inMemoryPort = normalizePort(currentServerStatus.port);
-  if (inMemoryPort) return inMemoryPort;
+  if (inMemoryPort && !(getBrowserId() === 'edge' && inMemoryPort === NATIVE_HOST.DEFAULT_PORT))
+    return inMemoryPort;
 
-  return NATIVE_HOST.DEFAULT_PORT;
+  return getDefaultPort();
 }
 
 // ==================== Reconnect Scheduling ====================
@@ -527,10 +539,21 @@ export function connectNativeHost(port: number = NATIVE_HOST.DEFAULT_PORT): bool
         } else if (message.type === NativeMessageType.SERVER_STARTED) {
           clearHandshakeTimer();
           const port = message.payload?.port;
+          const browserId = message.payload?.browserId;
           const token = message.payload?.token;
+          if (browserId !== getBrowserId() || port !== getDefaultPort()) {
+            console.warn(
+              `${LOG_PREFIX} Ignoring mismatched native handshake browser=${browserId} port=${port}`,
+            );
+            nativePort?.disconnect();
+            nativePort = null;
+            void markServerStopped('browser_identity_mismatch');
+            return;
+          }
           currentServerStatus = {
             isRunning: true,
             port: port,
+            browserId,
             token: token || currentServerStatus.token,
             lastUpdated: Date.now(),
           };
@@ -541,9 +564,16 @@ export function connectNativeHost(port: number = NATIVE_HOST.DEFAULT_PORT): bool
           console.log(`${SUCCESS_MESSAGES.SERVER_STARTED} on port ${port}`);
         } else if (message.type === 'server_info_response') {
           if (message.payload) {
+            if (
+              message.payload.browserId !== getBrowserId() ||
+              message.payload.port !== getDefaultPort()
+            ) {
+              return;
+            }
             currentServerStatus = {
               isRunning: message.payload.isRunning ?? currentServerStatus.isRunning,
               port: message.payload.port ?? currentServerStatus.port,
+              browserId: message.payload.browserId,
               token: message.payload.token ?? currentServerStatus.token,
               lastUpdated: Date.now(),
             };

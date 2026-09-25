@@ -7,6 +7,7 @@ import { HOST_NAME } from './constant';
 export enum BrowserType {
   CHROME = 'chrome',
   CHROMIUM = 'chromium',
+  EDGE = 'edge',
 }
 
 export interface BrowserConfig {
@@ -31,6 +32,8 @@ function getUserManifestPathForBrowser(browser: BrowserType): string {
         return path.join(appData, 'Google', 'Chrome', 'NativeMessagingHosts', `${HOST_NAME}.json`);
       case BrowserType.CHROMIUM:
         return path.join(appData, 'Chromium', 'NativeMessagingHosts', `${HOST_NAME}.json`);
+      case BrowserType.EDGE:
+        return path.join(appData, 'Microsoft', 'Edge', 'NativeMessagingHosts', `${HOST_NAME}.json`);
       default:
         return path.join(appData, 'Google', 'Chrome', 'NativeMessagingHosts', `${HOST_NAME}.json`);
     }
@@ -112,6 +115,14 @@ function getSystemManifestPathForBrowser(browser: BrowserType): string {
         );
       case BrowserType.CHROMIUM:
         return path.join(programFiles, 'Chromium', 'NativeMessagingHosts', `${HOST_NAME}.json`);
+      case BrowserType.EDGE:
+        return path.join(
+          programFiles,
+          'Microsoft',
+          'Edge',
+          'NativeMessagingHosts',
+          `${HOST_NAME}.json`,
+        );
       default:
         return path.join(
           programFiles,
@@ -139,6 +150,15 @@ function getSystemManifestPathForBrowser(browser: BrowserType): string {
           'NativeMessagingHosts',
           `${HOST_NAME}.json`,
         );
+      case BrowserType.EDGE:
+        return path.join(
+          '/Library',
+          'Application Support',
+          'Microsoft',
+          'Edge',
+          'NativeMessagingHosts',
+          `${HOST_NAME}.json`,
+        );
       default:
         return path.join(
           '/Library',
@@ -155,6 +175,8 @@ function getSystemManifestPathForBrowser(browser: BrowserType): string {
         return path.join('/etc', 'opt', 'chrome', 'native-messaging-hosts', `${HOST_NAME}.json`);
       case BrowserType.CHROMIUM:
         return path.join('/etc', 'chromium', 'native-messaging-hosts', `${HOST_NAME}.json`);
+      case BrowserType.EDGE:
+        return path.join('/etc', 'opt', 'edge', 'native-messaging-hosts', `${HOST_NAME}.json`);
       default:
         return path.join('/etc', 'opt', 'chrome', 'native-messaging-hosts', `${HOST_NAME}.json`);
     }
@@ -175,6 +197,10 @@ function getRegistryKeys(browser: BrowserType): { user: string; system: string }
     [BrowserType.CHROMIUM]: {
       user: `HKCU\\Software\\Chromium\\NativeMessagingHosts\\${HOST_NAME}`,
       system: `HKLM\\Software\\Chromium\\NativeMessagingHosts\\${HOST_NAME}`,
+    },
+    [BrowserType.EDGE]: {
+      user: `HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\${HOST_NAME}`,
+      system: `HKLM\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\${HOST_NAME}`,
     },
   };
 
@@ -209,6 +235,7 @@ export function detectInstalledBrowsers(): BrowserType[] {
     const browsers: Array<{ type: BrowserType; registryPath: string }> = [
       { type: BrowserType.CHROME, registryPath: 'HKLM\\SOFTWARE\\Google\\Chrome' },
       { type: BrowserType.CHROMIUM, registryPath: 'HKLM\\SOFTWARE\\Chromium' },
+      { type: BrowserType.EDGE, registryPath: 'HKLM\\SOFTWARE\\Microsoft\\Edge' },
     ];
 
     for (const browser of browsers) {

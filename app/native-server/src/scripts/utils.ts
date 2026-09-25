@@ -115,7 +115,12 @@ export function getSystemManifestPath(): string {
 export async function getMainPath(): Promise<string> {
   try {
     const packageDistDir = path.join(__dirname, '..');
-    const wrapperScriptName = process.platform === 'win32' ? 'run_host.bat' : 'run_host.sh';
+    const wrapperScriptName =
+      process.env.WEBCLAW_BROWSER_ID === 'edge' && process.platform === 'win32'
+        ? 'run_host_edge.bat'
+        : process.platform === 'win32'
+          ? 'run_host.bat'
+          : 'run_host.sh';
     const absoluteWrapperPath = path.resolve(packageDistDir, wrapperScriptName);
     return absoluteWrapperPath;
   } catch (error) {
@@ -236,18 +241,37 @@ async function ensureWindowsFilePermissions(packageDistDir: string): Promise<voi
 /**
  * Create Native Messaging host manifest content
  */
-export async function createManifestContent(): Promise<any> {
-  const mainPath = await getMainPath();
+export async function createManifestContent(browser?: BrowserType): Promise<any> {
+  const browserId =
+    browser === BrowserType.EDGE
+      ? 'edge'
+      : browser === BrowserType.CHROME
+        ? 'chrome'
+        : process.env.WEBCLAW_BROWSER_ID;
+  const mainPath = browser
+    ? path.resolve(
+        path.join(__dirname, '..'),
+        browserId === 'edge' && process.platform === 'win32'
+          ? 'run_host_edge.bat'
+          : process.platform === 'win32'
+            ? 'run_host.bat'
+            : 'run_host.sh',
+      )
+    : await getMainPath();
+  const configuredId = process.env.CHROME_EXTENSION_ID;
+  if (configuredId && !/^[a-p]{32}$/.test(configuredId)) {
+    throw new Error('Invalid extension id: expected 32 characters from a to p');
+  }
+  const extensionIds = configuredId
+    ? [configuredId]
+    : [EXTENSION_ID, 'biadnhhjlcaaopimoahhgcaipcbhafkf'];
 
   return {
     name: HOST_NAME,
     description: DESCRIPTION,
     path: mainPath, // Node.js可执行文件路径
     type: 'stdio',
-    allowed_origins: [
-      `chrome-extension://${EXTENSION_ID}/`,
-      'chrome-extension://biadnhhjlcaaopimoahhgcaipcbhafkf/', // locally loaded unpacked build
-    ],
+    allowed_origins: extensionIds.map((id) => `chrome-extension://${id}/`),
   };
 }
 
@@ -322,14 +346,13 @@ export async function tryRegisterUserLevelHost(targetBrowsers?: BrowserType[]): 
     }
 
     // 3. 创建清单内容
-    const manifest = await createManifestContent();
-
     let successCount = 0;
     const results: { browser: string; success: boolean; error?: string }[] = [];
 
     // 4. 为每个浏览器注册
     for (const browserType of browsersToRegister) {
       const config = getBrowserConfig(browserType);
+      const manifest = await createManifestContent(browserType);
       console.log(colorText(`\nRegistering for ${config.displayName}...`, 'blue'));
 
       try {

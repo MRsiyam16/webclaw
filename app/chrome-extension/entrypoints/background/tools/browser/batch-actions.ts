@@ -131,6 +131,19 @@ const MODIFIER_TOKENS: Record<string, 'Control' | 'Meta' | 'Alt' | 'Shift'> = {
   shift: 'Shift',
 };
 
+export function resolveBatchRefAlias(
+  alias: string,
+  refs: Map<string, { ref: string; documentToken: number }>,
+  currentDocumentToken: number | undefined,
+): { ref: string } | { verdict: 'stale_ref'; ref: string } | undefined {
+  const captured = refs.get(alias);
+  if (!captured) return undefined;
+  if (currentDocumentToken === undefined || currentDocumentToken !== captured.documentToken) {
+    return { verdict: 'stale_ref', ref: captured.ref };
+  }
+  return { ref: captured.ref };
+}
+
 function parseKeyCombo(rawKey: string): {
   keyDef: { key: string; code?: string; text?: string };
   modifierDefs: ModifierDef[];
@@ -192,6 +205,17 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
           error?: string;
         }> = [];
         let interruptedReason: string | undefined;
+        let allowNavigationAfterWait = false;
+        // Names produced by extract are batch-local aliases. A document token
+        // prevents a ref from resolving against a new document after navigation.
+        const batchRefs = new Map<string, { ref: string; documentToken: number }>();
+        const getDocumentToken = async (): Promise<number | undefined> => {
+          const result = await this.safeExecuteScript(tabId, {
+            target: { tabId },
+            func: () => performance.timeOrigin,
+          }).catch(() => [] as any);
+          return typeof result?.[0]?.result === 'number' ? result[0].result : undefined;
+        };
 
         let spaDriftNotice: string | undefined;
 
@@ -211,6 +235,25 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
 
         for (let i = 0; i < actions.length; i++) {
           const item = actions[i];
+          if (typeof item.ref === 'string' && batchRefs.has(item.ref)) {
+            const currentDocumentToken = await getDocumentToken();
+            const resolved = resolveBatchRefAlias(item.ref, batchRefs, currentDocumentToken)!;
+            if ('verdict' in resolved) {
+              actionResults.push({
+                actionIndex: i,
+                success: false,
+                error: `stale_ref: batch ref "${item.ref}" belongs to a previous page document`,
+                output: resolved,
+              });
+              if (item.abortOnFailure !== false) {
+                interruptedReason = `Action ${i} (${item.type}) failed with stale_ref`;
+                batchNetCapture.dispose();
+                break;
+              }
+              continue;
+            }
+            item.ref = resolved.ref;
+          }
           if (item && typeof item === 'object') {
             if (
               typeof (item as any).index === 'string' &&
@@ -237,7 +280,12 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
             batchNetCapture.dispose();
             break;
           }
-          if (currentTab.url !== initialUrl) {
+          if (
+            currentTab.url !== initialUrl &&
+            !allowNavigationAfterWait &&
+            (item as any).type !== 'waitForUrl' &&
+            (item as any).type !== 'waitForSelector'
+          ) {
             let sameOrigin = false;
             try {
               const initOrigin = new URL(initialUrl).origin;
@@ -525,21 +573,147 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
               }
 
               case 'fill_form': {
-                const fields = (item as any).fields;
-                if (!Array.isArray(fields) || fields.length === 0) {
+                const suppliedFields = (item as any).fields;
+                const fields = Array.isArray(suppliedFields)
+                  ? suppliedFields
+                  : suppliedFields && typeof suppliedFields === 'object'
+                    ? Object.entries(suppliedFields).map(([label, value]) => ({ label, value }))
+                    : [];
+                if (fields.length === 0) {
                   throw new Error(
-                    `Action ${i} of type 'fill_form' requires non-empty 'fields' array`,
+                    `Action ${i} of type 'fill_form' requires non-empty 'fields' array or label-to-value map`,
                   );
                 }
                 const fillFormResults: any[] = [];
                 for (let f = 0; f < fields.length; f++) {
                   const field = fields[f];
-                  const target = field.ref ?? field.index ?? field.selector;
+                  let resolvedSelector: string | undefined = field.selector;
+                  let target = field.ref ?? field.index ?? field.selector;
                   const textVal = String(field.value ?? field.text ?? '');
+                  if (!target && typeof field.label === 'string' && field.label.trim()) {
+                    try {
+                      const found = await this.safeExecuteScript(tabId, {
+                        target: { tabId },
+                        func: (label: string, formSelector?: string) => {
+                          const norm = (s: string) =>
+                            s.replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+                          let scope: ParentNode = document;
+                          if (formSelector) {
+                            try {
+                              const form = document.querySelector(formSelector);
+                              if (!form) return { verdict: 'failed', reason: 'form_not_found' };
+                              scope = form;
+                            } catch {
+                              return { verdict: 'failed', reason: 'invalid_form_selector' };
+                            }
+                          }
+                          const wanted = norm(label);
+                          const controls = Array.from(
+                            scope.querySelectorAll(
+                              'input,textarea,select,[contenteditable="true"]',
+                            ),
+                          ) as HTMLElement[];
+                          const associated = controls.filter((el) => {
+                            const id = el.id;
+                            return (
+                              !!id &&
+                              Array.from(scope.querySelectorAll('label[for]')).some(
+                                (l) =>
+                                  (l as HTMLLabelElement).htmlFor === id &&
+                                  norm(l.textContent || '') === wanted,
+                              )
+                            );
+                          });
+                          const labelAncestor = controls.filter((el) => {
+                            const l = el.closest('label');
+                            return !!l && norm(l.textContent || '') === wanted;
+                          });
+                          const labelMatches = [...new Set([...associated, ...labelAncestor])];
+                          const sources: Array<[string, (el: HTMLElement) => string | null]> = [
+                            ['aria-label', (el) => el.getAttribute('aria-label')],
+                            ['placeholder', (el) => el.getAttribute('placeholder')],
+                            ['name', (el) => el.getAttribute('name')],
+                            ['id', (el) => el.id || null],
+                          ];
+                          let match: HTMLElement | undefined;
+                          let source = 'label';
+                          if (labelMatches.length) {
+                            if (labelMatches.length !== 1)
+                              return { verdict: 'failed', reason: 'ambiguous' };
+                            match = labelMatches[0];
+                          } else {
+                            for (const [kind, read] of sources) {
+                              const matches = controls.filter((el) => {
+                                const v = read(el);
+                                return v !== null && norm(v) === wanted;
+                              });
+                              if (matches.length) {
+                                if (matches.length !== 1)
+                                  return { verdict: 'failed', reason: 'ambiguous', source: kind };
+                                match = matches[0];
+                                source = kind;
+                                break;
+                              }
+                            }
+                          }
+                          if (!match) return { verdict: 'failed', reason: 'not_found' };
+                          const esc = (v: string) => v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                          const selector = match.id
+                            ? `#${CSS.escape(match.id)}`
+                            : match.getAttribute('name')
+                              ? `${match.tagName.toLowerCase()}[name="${esc(match.getAttribute('name')!)}"]`
+                              : match.getAttribute('aria-label')
+                                ? `${match.tagName.toLowerCase()}[aria-label="${esc(match.getAttribute('aria-label')!)}"]`
+                                : match.getAttribute('placeholder')
+                                  ? `${match.tagName.toLowerCase()}[placeholder="${esc(match.getAttribute('placeholder')!)}"]`
+                                  : '';
+                          if (!selector) return { verdict: 'failed', reason: 'no_safe_selector' };
+                          const scopedSelector = formSelector
+                            ? `${formSelector} ${selector}`
+                            : selector;
+                          try {
+                            if (document.querySelectorAll(scopedSelector).length !== 1)
+                              return { verdict: 'failed', reason: 'ambiguous' };
+                          } catch {
+                            return { verdict: 'failed', reason: 'no_safe_selector' };
+                          }
+                          return { verdict: 'resolved', selector: scopedSelector, source };
+                        },
+                        args: [field.label, field.formSelector ?? (item as any).formSelector],
+                      });
+                      const resolution = found?.[0]?.result;
+                      if (resolution?.verdict === 'resolved') {
+                        resolvedSelector = resolution.selector;
+                        target = resolvedSelector;
+                      } else {
+                        fillFormResults.push({
+                          fieldIndex: f,
+                          success: false,
+                          verdict: 'failed',
+                          label: field.label,
+                          error:
+                            resolution?.reason === 'ambiguous'
+                              ? 'Field label is ambiguous'
+                              : 'Field could not be resolved',
+                        });
+                        continue;
+                      }
+                    } catch {
+                      fillFormResults.push({
+                        fieldIndex: f,
+                        success: false,
+                        verdict: 'failed',
+                        label: field.label,
+                        error: 'Field could not be resolved',
+                      });
+                      continue;
+                    }
+                  }
                   if (!target) {
                     fillFormResults.push({
                       fieldIndex: f,
                       success: false,
+                      verdict: 'failed',
                       error: 'Field locator failed: missing ref, index, or selector',
                     });
                     continue;
@@ -554,7 +728,7 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
                       target,
                       text: textVal,
                       clear: field.clear,
-                      selector: field.selector,
+                      selector: resolvedSelector,
                       ref: field.ref ?? field.index,
                       sessionId: args.sessionId,
                       sessionContext: args.sessionContext,
@@ -562,19 +736,27 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
                     fillFormResults.push({
                       fieldIndex: f,
                       success: fillRes.success && fillRes.committed !== false,
+                      verdict:
+                        fillRes.success && fillRes.committed !== false ? 'applied' : 'failed',
                       committed: fillRes.committed,
                       ref: field.ref ?? field.index,
-                      selector: field.selector,
+                      selector: resolvedSelector,
                       resolutionPath: fillRes.resolutionPath,
-                      error: fillRes.error || fillRes.diagnostics,
+                      error: fillRes.error
+                        ? String(fillRes.error).replace(textVal, '[redacted]')
+                        : fillRes.diagnostics,
                     });
                   } catch (fillErr) {
                     fillFormResults.push({
                       fieldIndex: f,
                       success: false,
+                      verdict: 'failed',
                       ref: field.ref ?? field.index,
-                      selector: field.selector,
-                      error: String(fillErr instanceof Error ? fillErr.message : fillErr),
+                      selector: resolvedSelector,
+                      error: String(fillErr instanceof Error ? fillErr.message : fillErr).replace(
+                        textVal,
+                        '[redacted]',
+                      ),
                     });
                   }
                 }
@@ -780,6 +962,9 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
                 const deadline = Date.now() + Math.max(0, timeoutMs);
 
                 let actualText = '';
+                let actualValue = '';
+                let selectedValue: string | undefined;
+                let selectedText: string | undefined;
                 let isVisible = false;
                 let disabled = false;
                 let ariaDisabled = false;
@@ -814,7 +999,8 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
                     }
                     if (coords?.success) {
                       isVisible = true;
-                      actualText = String(coords.text ?? coords.value ?? '');
+                      actualText = String(coords.text || coords.value || '');
+                      actualValue = String(coords.value ?? '');
                       disabled = Boolean(coords.disabled);
                       ariaDisabled = Boolean(coords.ariaDisabled);
                       validity = coords.validity;
@@ -897,8 +1083,16 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
                       return {
                         found: true,
                         visible,
-                        text: (el as HTMLElement).innerText ?? el.textContent ?? '',
-                        value: (el as HTMLInputElement).value ?? '',
+                        text:
+                          el instanceof HTMLSelectElement
+                            ? el.value
+                            : ((el as HTMLElement).innerText ?? el.textContent ?? ''),
+                        value: 'value' in el ? String((el as HTMLInputElement).value ?? '') : '',
+                        selectedValue: el instanceof HTMLSelectElement ? el.value : undefined,
+                        selectedText:
+                          el instanceof HTMLSelectElement
+                            ? (el.selectedOptions[0]?.text ?? '')
+                            : undefined,
                         disabled: Boolean((el as any).disabled || el.hasAttribute('disabled')),
                         ariaDisabled: el.getAttribute('aria-disabled') === 'true',
                         validity,
@@ -938,7 +1132,22 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
                     }
                     if (data?.found) {
                       isVisible = Boolean(data.visible);
-                      actualText = String(data.text || data.value || '');
+                      selectedValue = data.selectedValue;
+                      selectedText = data.selectedText;
+                      actualValue = String(
+                        (item as any).property === 'selectedText'
+                          ? (data.selectedText ?? '')
+                          : (item as any).property === 'selectedValue'
+                            ? (data.selectedValue ?? '')
+                            : (data.value ?? ''),
+                      );
+                      actualText = String(
+                        (item as any).property === 'selectedText'
+                          ? (data.selectedText ?? '')
+                          : (item as any).property === 'selectedValue'
+                            ? (data.selectedValue ?? '')
+                            : data.text || data.value || '',
+                      );
                       disabled = Boolean(data.disabled);
                       ariaDisabled = Boolean(data.ariaDisabled);
                       validity = data.validity;
@@ -984,13 +1193,13 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
                       break;
                     case 'matches':
                       try {
-                        passed = new RegExp(expected).test(actualText);
+                        passed = new RegExp(expected).test(actualValue || actualText);
                       } catch {
                         passed = false;
                       }
                       break;
                     case 'equals':
-                      passed = actualText.trim() === expected.trim();
+                      passed = (actualValue || actualText).trim() === expected.trim();
                       break;
                     case 'not_contains':
                       passed = !actualText.includes(expected);
@@ -1027,6 +1236,9 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
                   passed,
                   condition,
                   actualText,
+                  value: actualValue,
+                  selectedValue,
+                  selectedText,
                   isVisible,
                   disabled,
                   ariaDisabled,
@@ -1038,8 +1250,80 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
                 break;
               }
 
+              case 'waitForSelector': {
+                const selector = String((item as any).selector || '');
+                if (!selector) throw new Error('waitForSelector requires selector');
+                const timeoutMs = Math.max(
+                  0,
+                  Math.min(30000, Number((item as any).timeoutMs ?? 5000)),
+                );
+                const deadline = Date.now() + timeoutMs;
+                let found = false;
+                while (Date.now() <= deadline) {
+                  const result = await this.safeExecuteScript(tabId, {
+                    target: { tabId },
+                    func: (sel: string) => {
+                      try {
+                        return Boolean(document.querySelector(sel));
+                      } catch {
+                        return false;
+                      }
+                    },
+                    args: [selector],
+                  });
+                  found = Boolean(result?.[0]?.result);
+                  if (found) break;
+                  await new Promise((resolve) =>
+                    setTimeout(resolve, Math.min(100, Math.max(1, deadline - Date.now()))),
+                  );
+                }
+                if (!found) throw new Error(`Timed out waiting for selector: ${selector}`);
+                stepOutput = { waitedForSelector: selector, found: true };
+                allowNavigationAfterWait = true;
+                break;
+              }
+
+              case 'waitForUrl': {
+                const pattern = String((item as any).url || (item as any).urlPattern || '');
+                if (!pattern) throw new Error('waitForUrl requires url or urlPattern');
+                const timeoutMs = Math.max(
+                  0,
+                  Math.min(30000, Number((item as any).timeoutMs ?? 5000)),
+                );
+                const deadline = Date.now() + timeoutMs;
+                let matchedUrl = '';
+                let urlMatched = false;
+                while (Date.now() <= deadline) {
+                  const current = await chrome.tabs.get(tabId).catch(() => null);
+                  matchedUrl = current?.url || '';
+                  let matched = matchedUrl === pattern;
+                  if (!matched) {
+                    try {
+                      matched = new RegExp(pattern).test(matchedUrl);
+                    } catch {
+                      matched = matchedUrl.includes(pattern);
+                    }
+                  }
+                  if (matched) {
+                    urlMatched = true;
+                    break;
+                  }
+                  await new Promise((resolve) =>
+                    setTimeout(resolve, Math.min(100, Math.max(1, deadline - Date.now()))),
+                  );
+                  matchedUrl = '';
+                }
+                if (!urlMatched) throw new Error(`Timed out waiting for URL: ${pattern}`);
+                stepOutput = { waitedForUrl: pattern, currentUrl: matchedUrl };
+                allowNavigationAfterWait = true;
+                break;
+              }
+
               case 'extract': {
                 let extractedValue = '';
+                let capturedRef: string | undefined;
+                const documentToken = await getDocumentToken();
+                let targetInTopFrame = false;
                 const prop = item.property || 'text';
                 const targetRef = item.ref ?? item.index;
                 const targetIndex =
@@ -1054,6 +1338,7 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
                     targetIndex,
                   ]);
                   let coords = res?.[0]?.result;
+                  targetInTopFrame = Boolean(coords?.success);
                   if (!coords?.success) {
                     const frameResults = await executeInPage(
                       { tabId, allFrames: true },
@@ -1121,9 +1406,13 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
                     }
                     const el = queryDeep(sel);
                     if (!el) return null;
-                    if (p === 'attribute' && attr) return el.getAttribute(attr) ?? '';
-                    if (p === 'value') return (el as HTMLInputElement).value ?? '';
-                    return (el as HTMLElement).innerText ?? el.textContent ?? '';
+                    const ref = (globalThis as any)[
+                      Symbol.for('__browser_use_persistent_ref_map__')
+                    ]?.mint?.(el);
+                    if (p === 'attribute' && attr)
+                      return { value: el.getAttribute(attr) ?? '', ref };
+                    if (p === 'value') return { value: (el as HTMLInputElement).value ?? '', ref };
+                    return { value: (el as HTMLElement).innerText ?? el.textContent ?? '', ref };
                   };
                   const selRes = await this.safeExecuteScript(tabId, {
                     target: { tabId },
@@ -1131,6 +1420,7 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
                     args: [item.selector, prop, item.attributeName || ''],
                   });
                   let val = selRes?.[0]?.result;
+                  targetInTopFrame = val !== null && val !== undefined;
                   if (val === null || val === undefined) {
                     const frameResults = await this.safeExecuteScript(tabId, {
                       target: { tabId, allFrames: true },
@@ -1142,7 +1432,35 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
                     );
                     if (match) val = match.result;
                   }
-                  extractedValue = String(val ?? '');
+                  extractedValue = String(val?.value ?? val ?? '');
+                  capturedRef =
+                    targetInTopFrame && typeof val?.ref === 'string' && /^e\d+$/.test(val.ref)
+                      ? val.ref
+                      : undefined;
+                }
+
+                if (
+                  !capturedRef &&
+                  targetInTopFrame &&
+                  typeof targetIndex === 'number' &&
+                  targetIndex > 0
+                ) {
+                  const refResult = await this.safeExecuteScript(tabId, {
+                    target: { tabId },
+                    func: (index: number) => {
+                      const entry = (globalThis as any)[
+                        Symbol.for('__browser_use_isolated_index_map__')
+                      ]?.get?.(index);
+                      const el = entry && typeof entry.deref === 'function' ? entry.deref() : entry;
+                      const map = (globalThis as any)[
+                        Symbol.for('__browser_use_persistent_ref_map__')
+                      ];
+                      return el && map?.mint ? map.mint(el) : undefined;
+                    },
+                    args: [targetIndex],
+                  });
+                  const ref = refResult?.[0]?.result;
+                  if (typeof ref === 'string' && /^e\d+$/.test(ref)) capturedRef = ref;
                 }
 
                 const varName = item.variableName || `var_${i}`;
@@ -1152,7 +1470,10 @@ export class BatchActionsTool extends BaseBrowserToolExecutor {
                   variableName: varName,
                   value: extractedValue,
                   property: prop,
+                  ...(capturedRef ? { ref: capturedRef } : {}),
                 };
+                if (capturedRef && documentToken !== undefined)
+                  batchRefs.set(varName, { ref: capturedRef, documentToken });
                 break;
               }
 

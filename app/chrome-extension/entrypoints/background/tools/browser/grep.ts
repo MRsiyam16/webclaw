@@ -331,6 +331,7 @@ export class GrepTool extends BaseBrowserToolExecutor {
 
       // If interactive search yielded 0 matches, perform automatic deep page text fallback
       let textFallbackMatches: Array<{ line: number; text: string }> | undefined;
+      let textFallbackHitCount = 0;
       if (matches.length === 0 && searchType === 'interactive_only') {
         try {
           const inPageRes = await executeInPage<string>(
@@ -348,11 +349,13 @@ export class GrepTool extends BaseBrowserToolExecutor {
             for (let idx = 0; idx < lines.length; idx++) {
               const line = lines[idx].trim();
               if (line && pattern.test(line)) {
-                found.push({
-                  line: idx + 1,
-                  text: extractContextualSnippet(line, pattern),
-                });
-                if (found.length >= limit) break;
+                textFallbackHitCount++;
+                if (found.length < limit) {
+                  found.push({
+                    line: idx + 1,
+                    text: extractContextualSnippet(line, pattern),
+                  });
+                }
               }
             }
             if (found.length > 0) {
@@ -371,17 +374,20 @@ export class GrepTool extends BaseBrowserToolExecutor {
                 query: args.query,
                 searchType,
                 totalMatches:
-                  totalHitCount > 0 ? totalHitCount : (textFallbackMatches?.length ?? 0),
+                  totalHitCount > 0
+                    ? totalHitCount
+                    : (textFallbackHitCount ?? textFallbackMatches?.length ?? 0),
                 returnedCount:
                   matches.length > 0 ? matches.length : (textFallbackMatches?.length ?? 0),
                 truncated:
                   totalHitCount > matches.length ||
-                  (textFallbackMatches?.length ?? 0) > matches.length,
+                  (textFallbackHitCount ?? textFallbackMatches?.length ?? 0) >
+                    (matches.length > 0 ? matches.length : (textFallbackMatches?.length ?? 0)),
                 limit,
                 limitRequested,
                 ...(limitClamped ? { limitClamped: true } : {}),
-                scanScope:
-                  'Indexed document elements for the target tab; matches are paged by `limit`, so use totalMatches/truncated rather than assuming the page is complete.',
+                scanScope: textFallbackMatches ? 'page_text' : 'indexed_elements',
+                fallbackUsed: Boolean(textFallbackMatches),
                 matches: matches.length > 0 ? matches : (textFallbackMatches ?? []),
                 ...(autoScrollOutcome
                   ? {
@@ -389,11 +395,6 @@ export class GrepTool extends BaseBrowserToolExecutor {
                       scrollSteps: autoScrollOutcome.stepsTaken,
                       scrolledPx: autoScrollOutcome.scrolledPx,
                       coordinates: autoScrollOutcome.coordinates,
-                    }
-                  : {}),
-                ...(textFallbackMatches
-                  ? {
-                      note: `No interactive elements matched query "${args.query}". Displaying matches found in deep page text. Use ${resolveToolName('interact_index')} with coordinate, or ${resolveToolName('click_element')} with text/role.`,
                     }
                   : {}),
               },

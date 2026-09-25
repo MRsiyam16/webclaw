@@ -40,11 +40,11 @@ const SAMPLE = {
   pages_down: 0,
 };
 
-async function runReadDom(args: Record<string, unknown> = {}, tabId = 777_001) {
+async function runReadDom(args: Record<string, unknown> = {}, tabId = 777_001, sample = SAMPLE) {
   const mod = await import('../entrypoints/background/tools/browser/read-dom');
   const engine = await import('../entrypoints/background/tools/browser/in-page-engine');
   const spy = vi.spyOn(engine, 'executeInPage');
-  spy.mockResolvedValue([{ frameId: 0, result: { ...SAMPLE } }] as any);
+  spy.mockResolvedValue([{ frameId: 0, result: { ...sample } }] as any);
   (mod.readDOMTool as any).resolveAffinityTab = async () => ({
     id: tabId,
     url: 'https://x.test',
@@ -58,7 +58,16 @@ async function runReadDom(args: Record<string, unknown> = {}, tabId = 777_001) {
 
 describe('read_dom hard output budget', () => {
   it('caps the response at maxChars and reports truncated/totalChars', async () => {
-    const res = await runReadDom({ maxChars: 2_000, deltaOnly: false });
+    const indexedElements = Array.from({ length: 4_000 }, (_, i) => ({
+      index: i + 1,
+      tagName: 'button',
+      text: `Row ${i}`,
+      isInteractive: true,
+    }));
+    const res = await runReadDom({ maxChars: 2_000, limit: 4_000, deltaOnly: false }, 777_001, {
+      ...SAMPLE,
+      indexedElements,
+    });
     const text = res.content[0].text as string;
     const payload = JSON.parse(text);
 
@@ -67,8 +76,7 @@ describe('read_dom hard output budget', () => {
     expect(text.length).toBeLessThanOrEqual(2_000);
     // existing fields must keep working
     expect(payload.elementCount).toBe(4_000);
-    // interactiveCount counts isInteractive entries in indexedElements (1 here).
-    expect(payload.interactiveCount).toBe(1);
+    expect(payload.interactiveCount).toBe(4_000);
     expect(payload.snapshotId).toBeTruthy();
   });
 

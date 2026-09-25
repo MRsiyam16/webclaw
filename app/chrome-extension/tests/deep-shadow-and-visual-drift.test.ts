@@ -347,7 +347,9 @@ describe('Deep Shadow DOM Piercing & Visual Drift Compensation', () => {
       const parsed = JSON.parse(res.content[0].text);
       expect(parsed.totalMatches).toBe(1);
       expect(parsed.matches[0].text).toContain('ShredditArchitecture');
-      expect(parsed.note).toContain('No interactive elements matched');
+      expect(parsed.fallbackUsed).toBe(true);
+      expect(parsed.scanScope).toBe('page_text');
+      expect(parsed.note).toBeUndefined();
 
       spy.mockRestore();
     });

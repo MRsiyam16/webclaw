@@ -5,13 +5,14 @@
  */
 
 import { spawn } from 'node:child_process';
+import { readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '../../');
 
-interface TierConfig {
+export interface TierConfig {
   id: string;
   name: string;
   pattern: string;
@@ -45,7 +46,7 @@ const TIERS: TierConfig[] = [
   },
 ];
 
-async function runTier(tier: TierConfig): Promise<{
+export async function runTier(tier: TierConfig): Promise<{
   id: string;
   name: string;
   passed: number;
@@ -53,20 +54,41 @@ async function runTier(tier: TierConfig): Promise<{
   durationMs: number;
   success: boolean;
 }> {
+  const [relativeDir, patternName] = tier.pattern.split(/[/\\](?=[^/\\]+$)/);
+  const filePattern = new RegExp(
+    `^${patternName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace('\\*', '.*')}$`,
+  );
+  let testFiles: string[];
+  try {
+    const entries = await readdir(path.resolve(rootDir, relativeDir), { withFileTypes: true });
+    testFiles = entries
+      .filter((entry) => entry.isFile() && filePattern.test(entry.name))
+      .map((entry) => path.join(relativeDir, entry.name));
+  } catch {
+    testFiles = [];
+  }
+
+  if (testFiles.length === 0) {
+    return {
+      id: tier.id,
+      name: tier.name,
+      passed: 0,
+      failed: 1,
+      durationMs: 0,
+      success: false,
+    };
+  }
+
   return new Promise((resolve) => {
     const startTime = Date.now();
     let stdout = '';
     let stderr = '';
 
-    const args = [
-      '--experimental-strip-types',
-      '--test',
-      tier.pattern,
-    ];
+    const args = ['--experimental-strip-types', '--test', ...testFiles];
 
     const child = spawn(process.execPath, args, {
       cwd: rootDir,
-      shell: true,
+      shell: false,
       env: { ...process.env, NODE_ENV: 'test' },
     });
 
@@ -84,8 +106,8 @@ async function runTier(tier: TierConfig): Promise<{
       let failed = 0;
 
       // Parse TAP or test output summary
-      const passMatch = stdout.match(/# pass (\d+)/);
-      const failMatch = stdout.match(/# fail (\d+)/);
+      const passMatch = stdout.match(/(?:#|ℹ) pass (\d+)/);
+      const failMatch = stdout.match(/(?:#|ℹ) fail (\d+)/);
 
       if (passMatch) passed = Number.parseInt(passMatch[1], 10);
       if (failMatch) failed = Number.parseInt(failMatch[1], 10);
@@ -98,7 +120,9 @@ async function runTier(tier: TierConfig): Promise<{
         failed = notOkMatches ? notOkMatches.length : 0;
       }
 
-      const success = code === 0 && failed === 0;
+      const executed = passed + failed;
+      if (executed === 0) failed = 1;
+      const success = code === 0 && failed === 0 && executed > 0;
 
       if (!success) {
         console.error(`\n--- ${tier.name} Output on Failure ---`);
@@ -152,12 +176,12 @@ async function main() {
   for (const r of results) {
     const status = r.success ? '[OK]  ' : '[FAIL]';
     console.log(
-      `  ${status} ${r.id.padEnd(4)}: ${r.name.padEnd(46)} | Passed: ${String(r.passed).padStart(3)} | Failed: ${String(r.failed).padStart(2)} | Time: ${String(r.durationMs).padStart(5)}ms`
+      `  ${status} ${r.id.padEnd(4)}: ${r.name.padEnd(46)} | Passed: ${String(r.passed).padStart(3)} | Failed: ${String(r.failed).padStart(2)} | Time: ${String(r.durationMs).padStart(5)}ms`,
     );
   }
   console.log('----------------------------------------------------------------');
   console.log(
-    `  Total Suites: ${results.length} | Total Passed: ${totalPassed} | Total Failed: ${totalFailed} | Time: ${totalDuration}ms`
+    `  Total Suites: ${results.length} | Total Passed: ${totalPassed} | Total Failed: ${totalFailed} | Time: ${totalDuration}ms`,
   );
   console.log('================================================================\n');
 
@@ -170,7 +194,9 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error('Fatal Runner Exception:', err);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  main().catch((err) => {
+    console.error('Fatal Runner Exception:', err);
+    process.exit(1);
+  });
+}

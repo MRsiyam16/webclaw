@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import serverInstance from './server';
 import nativeMessagingHostInstance from './native-messaging-host';
+import { BROWSER_IDENTITY } from './browser-identity';
 
 try {
   serverInstance.setNativeHost(nativeMessagingHostInstance); // Server needs setNativeHost method
   nativeMessagingHostInstance.setServer(serverInstance); // NativeHost needs setServer method
   nativeMessagingHostInstance.start();
-  // Ensure Fastify HTTP bridge is listening on 12306 immediately
-  serverInstance.start(12306, nativeMessagingHostInstance).catch(() => {});
+  serverInstance.start(BROWSER_IDENTITY.port, nativeMessagingHostInstance).catch(() => {});
 } catch (error) {
   process.exit(1);
 }
@@ -25,8 +25,7 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
-process.on('exit', (code) => {
-});
+process.on('exit', (code) => {});
 
 process.on('uncaughtException', (error) => {
   process.exit(1);

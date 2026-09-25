@@ -2,7 +2,7 @@ import { createErrorResponse, ToolResult } from '@/common/tool-handler';
 import { BaseBrowserToolExecutor } from '../base-browser';
 import { TOOL_NAMES } from 'chrome-mcp-shared';
 import { executeInPage } from './in-page-engine';
-import { budgetText, DEFAULT_OUTPUT_BUDGET_CHARS } from './text-budget';
+import { budgetText } from './text-budget';
 
 export interface GetMarkdownParams {
   includeLinks?: boolean;
@@ -18,10 +18,34 @@ export interface GetMarkdownParams {
    * markdown is cut and a notice carrying the TRUE original length is appended.
    */
   maxLength?: number;
+  /** Return headings and table dimensions instead of page prose. */
+  mode?: 'outline' | 'full';
   tabId?: number;
   windowId?: number;
   sessionId?: string;
   sessionContext?: string;
+}
+
+/** Compact structural preview of markdown headings and table dimensions. */
+export function markdownOutline(markdown: string): string {
+  const lines = markdown.split(/\r?\n/);
+  const outline: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (/^#{1,6}\s+/.test(line)) outline.push(line);
+    if (
+      /^\|?.+\|.+\|?$/.test(line) &&
+      i + 1 < lines.length &&
+      /^\s*\|?\s*:?-{3,}/.test(lines[i + 1])
+    ) {
+      const columns = (line.replace(/^\||\|$/g, '').match(/\|/g)?.length ?? 0) + 1;
+      let rows = 0;
+      for (let j = i + 2; j < lines.length && lines[j].includes('|'); j++) rows++;
+      outline.push(`Table: ${columns} columns, ${rows} data rows`);
+      i++;
+    }
+  }
+  return outline.join('\n');
 }
 
 /**
@@ -92,7 +116,7 @@ export class GetMarkdownTool extends BaseBrowserToolExecutor {
       }
 
       const includeLinks = args.includeLinks ?? true;
-      const fit = args.fit ?? false;
+      const fit = args.fit ?? !args.selector;
 
       let markdown: string | null = null;
       if (args.selector) {
@@ -108,7 +132,8 @@ export class GetMarkdownTool extends BaseBrowserToolExecutor {
 
       // Hard output budget: a heavy article converts to hundreds of KB of
       // markdown, which is unusable in a single turn.
-      const budgeted = budgetText(markdown, args.maxLength ?? DEFAULT_OUTPUT_BUDGET_CHARS);
+      const selected = args.mode === 'outline' ? markdownOutline(markdown) : markdown;
+      const budgeted = budgetText(selected, args.maxLength ?? 40_000);
 
       return {
         content: [
