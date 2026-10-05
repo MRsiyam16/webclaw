@@ -6,7 +6,8 @@ Tev1 is an optional local fallback for ambiguous decisions in `chrome_act_toward
 
 The setting is read by the native MCP server at startup (not by generated `run_host` wrappers). Enable it in the environment of the process manager that launches the server, then restart that server:
 
-- Windows user environment: `setx WEBCLAW_TEV1_ENABLED true`, then restart the MCP client/server so its new process inherits the setting.
+- Windows user environment: `setx WEBCLAW_TEV1_ENABLED true`, then fully quit and reopen Chrome before reconnecting the native host. Native Messaging hosts inherit the environment of the Chrome process that launches them; restarting only the MCP client/server does not refresh an already-running Chrome process's environment.
+- For a shared Windows install that must survive native-host restarts and package rebuilds without restarting Chrome, point the Chrome Native Messaging manifest at a stable external launcher (outside generated `dist/`), which sets `WEBCLAW_TEV1_ENABLED=true` and calls the installed `run_host.bat`. Keep the user environment setting as the durable source too; do not make edits to generated wrappers the only opt-in source.
 - macOS/Linux service or shell: set `WEBCLAW_TEV1_ENABLED=true` in the MCP server's environment, then restart it.
 - To disable, unset the variable or set it to any value other than `true`, then restart.
 
