@@ -27,7 +27,7 @@ import * as crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { mediaAssetStore } from '../media-asset-store';
 import { getChromeMcpPort, SERVER_CONFIG } from '../constant';
-import { FastDecisionEngine } from '../jev';
+import { FastDecisionEngine } from '../decision';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { BROWSER_IDENTITY } from '../browser-identity';
 import { traceToolCall } from './tool-trace';
@@ -97,7 +97,9 @@ export async function prepareMediaArgsIfNeeded(name: string, args: any): Promise
 const TOOL_PROFILE = resolveToolProfile(process.env.CHROME_MCP_TOOL_PROFILE);
 const EXPOSED_TOOLS = filterToolSchemas(TOOL_SCHEMAS, TOOL_PROFILE);
 
-const fastDecisionEngine = new FastDecisionEngine();
+const fastDecisionEngine = new FastDecisionEngine('auto', {
+  tev1Enabled: process.env.WEBCLAW_TEV1_ENABLED === 'true',
+});
 
 // Per-session dynamic tool activation store
 const sessionExtraTools = new Map<string, Set<string>>();
